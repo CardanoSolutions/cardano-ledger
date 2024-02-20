@@ -1,5 +1,16 @@
 # Version history for `cardano-ledger-babbage`
 
+## 1.10.0.0
+
+* Add `ProtVer` argument to `TxInfo` functions:
+  * `transTxRedeemers`
+  * `toPlutusV2Args`
+
+### `testlib`
+
+* Move `TxInfo` golden tests over from the older `-test` package. #4599
+  * Also move the `gen-golden` executable over.
+
 ## 1.9.0.0
 
 * Change instance of `TranslationContext` to `NoGenesis`

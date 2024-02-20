@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE EmptyDataDeriving #-}
@@ -16,6 +17,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Cardano.Ledger.Conway.Rules.Gov (
@@ -26,7 +28,7 @@ module Cardano.Ledger.Conway.Rules.Gov (
   ConwayGovPredFailure (..),
 ) where
 
-import Cardano.Ledger.Address (RewardAccount, raNetwork)
+import Cardano.Ledger.Address (RewardAccount, raCredential, raNetwork)
 import Cardano.Ledger.BaseTypes (
   EpochInterval (..),
   EpochNo (..),
@@ -59,6 +61,7 @@ import Cardano.Ledger.CertState (
   authorizedHotCommitteeCredentials,
  )
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Conway.Core (ppGovActionDepositL, ppGovActionLifetimeL)
 import Cardano.Ledger.Conway.Era (ConwayEra, ConwayGOV)
 import Cardano.Ledger.Conway.Governance (
   GovAction (..),
@@ -81,6 +84,8 @@ import Cardano.Ledger.Conway.Governance (
   isCommitteeVotingAllowed,
   isDRepVotingAllowed,
   isStakePoolVotingAllowed,
+  pProcGovActionL,
+  pProcReturnAddrL,
   pRootsL,
   proposalsActionsMap,
   proposalsAddAction,
@@ -91,8 +96,6 @@ import Cardano.Ledger.Conway.Governance (
 import Cardano.Ledger.Conway.Governance.Proposals (mapProposals)
 import Cardano.Ledger.Conway.PParams (
   ConwayEraPParams (..),
-  ppGovActionDepositL,
-  ppGovActionLifetimeL,
  )
 import Cardano.Ledger.Conway.TxCert
 import Cardano.Ledger.Core
@@ -100,9 +103,12 @@ import Cardano.Ledger.Credential (Credential)
 import Cardano.Ledger.Keys (KeyRole (..))
 import Cardano.Ledger.Rules.ValidationMode (Test, runTest)
 import qualified Cardano.Ledger.Shelley.HardForks as HF (bootstrapPhase)
+import Cardano.Ledger.Shelley.LedgerState (dsUnifiedL)
 import Cardano.Ledger.Shelley.PParams (pvCanFollow)
 import Cardano.Ledger.TxIn (TxId (..))
+import qualified Cardano.Ledger.UMap as UMap
 import Control.DeepSeq (NFData)
+import Control.Monad (unless)
 import Control.Monad.Trans.Reader (asks)
 import Control.State.Transition.Extended (
   STS (..),
@@ -138,6 +144,17 @@ data GovEnv era = GovEnv
   , geCertState :: !(CertState era)
   }
   deriving (Generic)
+
+instance EraPParams era => EncCBOR (GovEnv era) where
+  encCBOR x@(GovEnv _ _ _ _ _) =
+    let GovEnv {..} = x
+     in encode $
+          Rec GovEnv
+            !> To geTxId
+            !> To geEpoch
+            !> To gePParams
+            !> To gePPolicy
+            !> To geCertState
 
 instance (NFData (PParams era), Era era) => NFData (GovEnv era)
 deriving instance (Show (PParams era), Era era) => Show (GovEnv era)
@@ -182,6 +199,12 @@ data ConwayGovPredFailure era
       (NonEmpty (Voter (EraCrypto era), GovActionId (EraCrypto era)))
   | -- | Predicate failure for votes by entities that are not present in the ledger state
     VotersDoNotExist (NonEmpty (Voter (EraCrypto era)))
+  | -- | Treasury withdrawals that sum up to zero are not allowed
+    ZeroTreasuryWithdrawals (GovAction era)
+  | -- | Proposals that have an invalid reward account for returns of the deposit
+    ProposalReturnAccountDoesNotExist (RewardAccount (EraCrypto era))
+  | -- | Treasury withdrawal proposals to an invalid reward account
+    TreasuryWithdrawalReturnAccountsDoNotExist (NonEmpty (RewardAccount (EraCrypto era)))
   deriving (Eq, Show, Generic)
 
 type instance EraRuleFailure "GOV" (ConwayEra c) = ConwayGovPredFailure (ConwayEra c)
@@ -211,6 +234,9 @@ instance EraPParams era => DecCBOR (ConwayGovPredFailure era) where
     12 -> SumD DisallowedProposalDuringBootstrap <! From
     13 -> SumD DisallowedVotesDuringBootstrap <! From
     14 -> SumD VotersDoNotExist <! From
+    15 -> SumD ZeroTreasuryWithdrawals <! From
+    16 -> SumD ProposalReturnAccountDoesNotExist <! From
+    17 -> SumD TreasuryWithdrawalReturnAccountsDoNotExist <! From
     k -> Invalid k
 
 instance EraPParams era => EncCBOR (ConwayGovPredFailure era) where
@@ -249,6 +275,12 @@ instance EraPParams era => EncCBOR (ConwayGovPredFailure era) where
         Sum DisallowedVotesDuringBootstrap 13 !> To votes
       VotersDoNotExist voters ->
         Sum VotersDoNotExist 14 !> To voters
+      ZeroTreasuryWithdrawals ga ->
+        Sum ZeroTreasuryWithdrawals 15 !> To ga
+      ProposalReturnAccountDoesNotExist returnAccount ->
+        Sum ProposalReturnAccountDoesNotExist 16 !> To returnAccount
+      TreasuryWithdrawalReturnAccountsDoNotExist accounts ->
+        Sum TreasuryWithdrawalReturnAccountsDoNotExist 17 !> To accounts
 
 instance EraPParams era => ToCBOR (ConwayGovPredFailure era) where
   toCBOR = toEraCBOR @era
@@ -269,6 +301,14 @@ data GovSignal era = GovSignal
   }
   deriving (Generic)
 
+instance (EraPParams era, EraTxCert era) => EncCBOR (GovSignal era) where
+  encCBOR x@(GovSignal _ _ _) =
+    let GovSignal {..} = x
+     in encode $
+          Rec GovSignal
+            !> To gsVotingProcedures
+            !> To gsProposalProcedures
+            !> To gsCertificates
 deriving instance (EraPParams era, Eq (TxCert era)) => Eq (GovSignal era)
 deriving instance (EraPParams era, Show (TxCert era)) => Show (GovSignal era)
 
@@ -330,11 +370,12 @@ checkBootstrapVotes pp votes
           _ -> isBootstrapAction $ gasAction gas
   | otherwise = pure ()
 
-actionWellFormed :: ConwayEraPParams era => GovAction era -> Test (ConwayGovPredFailure era)
-actionWellFormed ga = failureUnless isWellFormed $ MalformedProposal ga
+actionWellFormed ::
+  ConwayEraPParams era => ProtVer -> GovAction era -> Test (ConwayGovPredFailure era)
+actionWellFormed pv ga = failureUnless isWellFormed $ MalformedProposal ga
   where
     isWellFormed = case ga of
-      ParameterChange _ ppd _ -> ppuWellFormed ppd
+      ParameterChange _ ppd _ -> ppuWellFormed pv ppd
       _ -> True
 
 mkGovActionState ::
@@ -390,7 +431,7 @@ govTransition ::
   TransitionRule (EraRule "GOV" era)
 govTransition = do
   TRC
-    ( GovEnv txid currentEpoch pp constitutionPolicy CertState {certPState, certVState}
+    ( GovEnv txid currentEpoch pp constitutionPolicy CertState {certDState, certPState, certVState}
       , st
       , GovSignal {gsVotingProcedures, gsProposalProcedures, gsCertificates}
       ) <-
@@ -418,7 +459,20 @@ govTransition = do
         failOnJust badHardFork id
 
         -- PParamsUpdate well-formedness check
-        runTest $ actionWellFormed pProcGovAction
+        runTest $ actionWellFormed (pp ^. ppProtocolVersionL) pProcGovAction
+
+        unless (HF.bootstrapPhase $ pp ^. ppProtocolVersionL) $ do
+          let refundAddress = proposal ^. pProcReturnAddrL
+              govAction = proposal ^. pProcGovActionL
+          UMap.member' (raCredential refundAddress) (certDState ^. dsUnifiedL)
+            ?! ProposalReturnAccountDoesNotExist refundAddress
+          case govAction of
+            TreasuryWithdrawals withdrawals _ -> do
+              let nonRegisteredAccounts =
+                    flip Map.filterWithKey withdrawals $ \withdrawalAddress _ ->
+                      not $ UMap.member' (raCredential withdrawalAddress) (certDState ^. dsUnifiedL)
+              failOnNonEmpty (Map.keys nonRegisteredAccounts) TreasuryWithdrawalReturnAccountsDoNotExist
+            _ -> pure ()
 
         -- Deposit check
         let expectedDep = pp ^. ppGovActionDepositL
@@ -442,6 +496,10 @@ govTransition = do
 
                   -- Policy check
                   runTest $ checkPolicy @era constitutionPolicy proposalPolicy
+
+                  unless (HF.bootstrapPhase (pp ^. ppProtocolVersionL)) $
+                    -- The sum of all withdrawals must be positive
+                    F.fold wdrls /= mempty ?! ZeroTreasuryWithdrawals pProcGovAction
           UpdateCommittee _mPrevGovActionId membersToRemove membersToAdd _qrm -> do
             checkConflictingUpdate
             checkExpirationEpoch

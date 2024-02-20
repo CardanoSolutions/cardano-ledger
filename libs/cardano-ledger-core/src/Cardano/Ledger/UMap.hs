@@ -10,6 +10,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -80,6 +82,7 @@ module Cardano.Ledger.UMap (
   -- * Set and Map operations on `UView`s
   nullUView,
   member,
+  member',
   notMember,
   delete,
   delete',
@@ -109,6 +112,8 @@ module Cardano.Ledger.UMap (
   findWithDefault,
   size,
   domDeleteAll,
+  deleteStakingCredential,
+  extractStakingCredential,
 )
 where
 
@@ -127,9 +132,10 @@ import qualified Data.Aeson as Aeson
 import Data.Foldable (Foldable (..))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.MapExtras (intersectDomPLeft)
+import Data.MapExtras as MapExtras (extract, intersectDomPLeft)
 import Data.Maybe as Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Maybe.Strict (StrictMaybe (..))
+import Data.Proxy
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Set.Internal as SI (Set (Tip))
@@ -213,7 +219,7 @@ data UMElem c
   | TFFEF {-# UNPACK #-} !RDPair !(Set Ptr) !(DRep c)
   | TFFFE {-# UNPACK #-} !RDPair !(Set Ptr) !(KeyHash 'StakePool c)
   | TFFFF {-# UNPACK #-} !RDPair !(Set Ptr) !(KeyHash 'StakePool c) !(DRep c)
-  deriving (Eq, Ord, Generic, NoThunks, NFData)
+  deriving (Eq, Ord, Show, Generic, NoThunks, NFData)
 
 instance Crypto c => ToJSON (UMElem c) where
   toJSON = object . toUMElemair
@@ -238,7 +244,7 @@ instance Crypto c => DecShareCBOR (UMElem c) where
     decodeRecordNamed "UMElem" (const 4) $
       UMElem
         <$> decCBOR
-        <*> decCBOR
+        <*> ifDecoderVersionAtLeast (natVersion @9) (mempty <$ dropCBOR (Proxy @(Set Ptr))) decCBOR
         <*> decShareMonadCBOR is
         <*> decCBOR
 
@@ -410,17 +416,6 @@ pattern UMElem i j k l <- (umElemAsTuple -> (i, j, k, l))
 
 {-# COMPLETE UMElem #-}
 
-instance Show (UMElem c) where
-  show (UMElem a b c d) =
-    unlines
-      [ "(UMElem ("
-      , show a <> ", "
-      , show b <> ", "
-      , show c <> ", "
-      , show d
-      , "))"
-      ]
-
 -- | A unified map represents 4 Maps with domain @(Credential 'Staking c)@
 --
 -- 1) Map (Credential 'Staking c) RDPair  -- (RDPair rewardCoin depositCoin)
@@ -473,7 +468,11 @@ instance Crypto c => DecShareCBOR (UMap c) where
           decodeRecordNamed "UMap" (const 2) $ do
             umElems <- decodeMap (interns a <$> decCBOR) (decShareCBOR b)
             let a' = internsFromMap umElems <> a
-            umPtrs <- decodeMap decCBOR (interns a' <$> decCBOR)
+            umPtrs <-
+              ifDecoderVersionAtLeast
+                (natVersion @9)
+                (mempty <$ dropCBOR (Proxy @(Map (Credential 'Staking c) (Set Ptr))))
+                $ decodeMap decCBOR (interns a' <$> decCBOR)
             pure (UMap {umElems, umPtrs}, (a', b))
       )
 
@@ -944,11 +943,25 @@ domDelete = (⋪)
 -- | Delete the stake credentials in the domain and all associated ranges from the `UMap`
 -- This can be expensive when there are many pointers associated with the credential.
 domDeleteAll :: Set (Credential 'Staking c) -> UMap c -> UMap c
-domDeleteAll ks UMap {umElems, umPtrs} =
-  UMap
-    { umElems = Map.withoutKeys umElems ks
-    , umPtrs = Map.filter (`Set.notMember` ks) umPtrs
-    }
+domDeleteAll ks umap = Set.foldr' deleteStakingCredential umap ks
+
+-- | Completely remove the staking credential from the UMap, including all associated
+-- pointers.
+deleteStakingCredential :: Credential 'Staking c -> UMap c -> UMap c
+deleteStakingCredential cred = snd . extractStakingCredential cred
+
+-- | Just like `deleteStakingCredential`, but also returned the removed element.
+extractStakingCredential :: Credential 'Staking c -> UMap c -> (Maybe (UMElem c), UMap c)
+extractStakingCredential cred umap@UMap {umElems, umPtrs} =
+  case MapExtras.extract cred umElems of
+    (Nothing, _) -> (Nothing, umap)
+    (e@(Just (UMElem _ ptrs _ _)), umElems') ->
+      ( e
+      , UMap
+          { umElems = umElems'
+          , umPtrs = umPtrs `Map.withoutKeys` ptrs
+          }
+      )
 
 -- | Delete all elements in the given `Set` from the range of the given map-like `UView`.
 -- This is slow for SPoolUView, RewDepUView, and DReps UViews, better hope the sets are small
@@ -989,6 +1002,10 @@ DRepUView UMap {umElems, umPtrs} ⋫ dRepSet = UMap (Map.foldlWithKey' accum umE
              in Map.update go key ans
       _ -> ans
 rngDelete = (⋫)
+
+-- | Checks for membership directly against `umElems` instead of a `UView`.
+member' :: Credential 'Staking c -> UMap c -> Bool
+member' k = Map.member k . umElems
 
 -- | Membership check for a `UView`, just like `Map.member`
 --

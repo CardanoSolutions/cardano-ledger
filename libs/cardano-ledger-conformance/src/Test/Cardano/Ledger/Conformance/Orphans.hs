@@ -8,8 +8,9 @@ module Test.Cardano.Ledger.Conformance.Orphans where
 
 import Data.Bifunctor (Bifunctor (..))
 import Data.Default.Class (Default)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import qualified Data.Set as Set
+import Data.Void (Void)
 import GHC.Generics (Generic)
 import Lib
 import Test.Cardano.Ledger.Common (NFData, ToExpr)
@@ -17,65 +18,9 @@ import Test.Cardano.Ledger.Conformance.SpecTranslate.Core (FixupSpecRep (..), Op
 import Test.Cardano.Ledger.Conformance.Utils
 import Test.Cardano.Ledger.Conway.TreeDiff (Expr (..), ToExpr (..))
 
-deriving instance Generic (HSSet a)
+deriving instance Generic HsRewardUpdate
 
-deriving instance Generic GovActionState
-
-deriving instance Generic Vote
-
-deriving instance Generic GovProposal
-
-deriving instance Generic GovAction
-
-deriving instance Generic GovVote
-
-deriving instance Generic GovSignal
-
-deriving instance Generic GovEnv
-
-deriving instance Generic EnactState
-
-deriving instance Generic DepositPurpose
-
-deriving instance Generic CertEnv
-
-deriving instance Generic PState
-
-deriving instance Generic DState
-
-deriving instance Generic GState
-
-deriving instance Generic CertState
-
-deriving instance Generic RatifyEnv
-
-deriving instance Generic RatifyState
-
-deriving instance Generic StakeDistrs
-
-deriving instance Generic EnactEnv
-
-deriving instance Generic DelegEnv
-
-deriving instance Generic PoolThresholds
-
-deriving instance Generic DrepThresholds
-
-deriving instance Generic NewEpochEnv
-
-deriving instance Generic EpochState
-
-deriving instance Generic Snapshots
-
-deriving instance Generic Snapshot
-
-deriving instance Generic LedgerState
-
-deriving instance Generic Acnt
-
-deriving instance Generic RewardUpdate
-
-deriving instance Generic NewEpochState
+deriving instance Ord DepositPurpose
 
 deriving instance Ord Tag
 
@@ -93,77 +38,11 @@ deriving instance Ord DrepThresholds
 
 deriving instance Ord PParamsUpdate
 
+deriving instance Ord RwdAddr
+
 deriving instance Ord GovAction
 
 deriving instance Ord GovActionState
-
-deriving instance Eq a => Eq (HSSet a)
-
-deriving instance Eq AgdaEmpty
-
-deriving instance Eq TxBody
-
-deriving instance Eq Tag
-
-deriving instance Eq TxWitnesses
-
-deriving instance Eq Tx
-
-deriving instance Eq PoolThresholds
-
-deriving instance Eq DrepThresholds
-
-deriving instance Eq PParams
-
-deriving instance Eq UTxOState
-
-deriving instance Eq PParamsUpdate
-
-deriving instance Eq GovAction
-
-deriving instance Eq GovVote
-
-deriving instance Eq GovSignal
-
-deriving instance Eq GovProposal
-
-deriving instance Eq Vote
-
-deriving instance Eq GovActionState
-
-deriving instance Eq GovEnv
-
-deriving instance Eq EnactState
-
-deriving instance Eq UTxOEnv
-
-deriving instance Eq DepositPurpose
-
-deriving instance Eq CertEnv
-
-deriving instance Eq DState
-
-deriving instance Eq PState
-
-deriving instance Eq GState
-
-deriving instance Eq CertState
-
-deriving instance Eq RatifyState
-
-deriving instance Eq EpochState
-
-deriving instance Eq Snapshots
-
-deriving instance Eq Snapshot
-
-deriving instance Eq Acnt
-
-deriving instance Eq LedgerState
-
-deriving instance Eq RewardUpdate
-
-deriving instance Eq NewEpochState
 
 instance (NFData k, NFData v) => NFData (HSMap k v)
 
@@ -171,9 +50,17 @@ instance NFData a => NFData (HSSet a)
 
 instance NFData PParamsUpdate
 
+instance NFData RwdAddr
+
 instance NFData GovAction
 
-instance NFData TxId
+instance NFData BaseAddr
+
+instance NFData BootstrapAddr
+
+instance NFData Timelock
+
+instance NFData HashedTimelock
 
 instance NFData UTxOState
 
@@ -185,13 +72,11 @@ instance NFData GovRole
 
 instance NFData GovActionState
 
-instance NFData AgdaEmpty
+instance NFData Anchor
 
 instance NFData GovVote
 
 instance NFData GovProposal
-
-instance NFData GovSignal
 
 instance NFData DrepThresholds
 
@@ -205,7 +90,9 @@ instance NFData GovEnv
 
 instance NFData VDeleg
 
-instance NFData TxCert
+instance NFData PoolParams
+
+instance NFData DCert
 
 instance NFData TxBody
 
@@ -239,8 +126,6 @@ instance NFData EnactEnv
 
 instance NFData DelegEnv
 
-instance NFData NewEpochEnv
-
 instance NFData EpochState
 
 instance NFData Snapshots
@@ -249,9 +134,9 @@ instance NFData Snapshot
 
 instance NFData Acnt
 
-instance NFData LedgerState
+instance NFData LState
 
-instance NFData RewardUpdate
+instance NFData HsRewardUpdate
 
 instance NFData NewEpochState
 
@@ -265,22 +150,21 @@ instance (ToExpr k, ToExpr v) => ToExpr (HSMap k v)
 
 instance ToExpr PParamsUpdate
 
+instance ToExpr RwdAddr
+
 instance ToExpr GovAction
 
 instance ToExpr GovRole
 
 instance ToExpr Vote
 
-instance ToExpr TxId where
-  toExpr (MkTxId x) = App "TxId" [agdaHashToExpr 32 x]
-
 instance ToExpr GovActionState
+
+instance ToExpr Anchor
 
 instance ToExpr GovProposal
 
 instance ToExpr GovVote
-
-instance ToExpr GovSignal
 
 instance ToExpr PoolThresholds
 
@@ -294,11 +178,19 @@ instance ToExpr EnactState
 
 instance ToExpr VDeleg
 
-instance ToExpr TxCert
+instance ToExpr PoolParams
+
+instance ToExpr DCert
+
+instance ToExpr BaseAddr
+
+instance ToExpr BootstrapAddr
+
+instance ToExpr Timelock
+
+instance ToExpr HashedTimelock
 
 instance ToExpr TxBody
-
-instance ToExpr AgdaEmpty
 
 instance ToExpr Tag
 
@@ -332,23 +224,23 @@ instance ToExpr EnactEnv
 
 instance ToExpr DelegEnv
 
-instance ToExpr NewEpochEnv
-
 instance ToExpr EpochState
 
 instance ToExpr Snapshots
 
 instance ToExpr Snapshot
 
-instance ToExpr LedgerState
+instance ToExpr LState
 
 instance ToExpr Acnt
 
-instance ToExpr RewardUpdate
+instance ToExpr HsRewardUpdate
 
 instance ToExpr NewEpochState
 
 instance Default (HSMap k v)
+
+instance FixupSpecRep Void
 
 instance FixupSpecRep OpaqueErrorString
 
@@ -358,13 +250,14 @@ instance FixupSpecRep Char where
   fixup = id
 
 instance
-  ( Ord k
+  ( Eq v
+  , Ord k
   , FixupSpecRep k
   , FixupSpecRep v
   ) =>
   FixupSpecRep (HSMap k v)
   where
-  fixup (MkHSMap l) = MkHSMap . sortOn fst $ bimap fixup fixup <$> l
+  fixup (MkHSMap l) = MkHSMap . sortOn fst $ bimap fixup fixup <$> nub l
 
 instance (Ord a, FixupSpecRep a) => FixupSpecRep (HSSet a) where
   fixup (MkHSSet l) = MkHSSet . Set.toList . Set.fromList $ fixup <$> l
@@ -375,14 +268,20 @@ instance FixupSpecRep a => FixupSpecRep (Maybe a)
 
 instance (FixupSpecRep a, FixupSpecRep b) => FixupSpecRep (Either a b)
 
-instance FixupSpecRep Integer where
-  fixup = id
-
 instance FixupSpecRep Bool
 
-instance FixupSpecRep TxId
+instance FixupSpecRep TxId where
+  fixup = id
 
 instance FixupSpecRep ()
+
+instance FixupSpecRep BaseAddr
+
+instance FixupSpecRep BootstrapAddr
+
+instance FixupSpecRep Timelock
+
+instance FixupSpecRep HashedTimelock
 
 instance FixupSpecRep UTxOState
 
@@ -392,7 +291,11 @@ instance FixupSpecRep GovRole
 
 instance FixupSpecRep VDeleg
 
+instance FixupSpecRep DepositPurpose
+
 instance FixupSpecRep DState
+
+instance FixupSpecRep PoolParams
 
 instance FixupSpecRep PState
 
@@ -402,13 +305,16 @@ instance FixupSpecRep CertState
 
 instance FixupSpecRep Vote
 
+instance FixupSpecRep Lib.Rational where
+  fixup = id
+
 instance FixupSpecRep PParamsUpdate
+
+instance FixupSpecRep RwdAddr
 
 instance FixupSpecRep GovAction
 
 instance FixupSpecRep GovActionState
-
-instance FixupSpecRep AgdaEmpty
 
 instance FixupSpecRep StakeDistrs
 
@@ -432,8 +338,8 @@ instance FixupSpecRep Snapshot
 
 instance FixupSpecRep Acnt
 
-instance FixupSpecRep LedgerState
+instance FixupSpecRep LState
 
-instance FixupSpecRep RewardUpdate
+instance FixupSpecRep HsRewardUpdate
 
 instance FixupSpecRep NewEpochState

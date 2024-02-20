@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               cardano-ledger-allegra
-version:            1.6.0.0
+version:            1.6.0.1
 license:            Apache-2.0
 maintainer:         operations@iohk.io
 author:             IOHK
@@ -34,6 +34,7 @@ library
         Cardano.Ledger.Allegra.Tx
         Cardano.Ledger.Allegra.TxAuxData
         Cardano.Ledger.Allegra.TxBody
+        Cardano.Ledger.Allegra.TxBody.Internal
 
     hs-source-dirs:   src
     other-modules:
@@ -66,9 +67,9 @@ library
         aeson,
         bytestring,
         cardano-crypto-class,
-        cardano-ledger-binary ^>=1.3,
-        cardano-ledger-core ^>=1.14,
-        cardano-ledger-shelley ^>=1.13,
+        cardano-ledger-binary >=1.4,
+        cardano-ledger-core ^>=1.15,
+        cardano-ledger-shelley >=1.13 && <1.15,
         cardano-strict-containers,
         cardano-slotting,
         cborg,

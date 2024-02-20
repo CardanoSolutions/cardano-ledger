@@ -1,8 +1,15 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Specs necessary to generate, environment, state, and signal
 -- for the UTXO rule
@@ -10,157 +17,168 @@ module Test.Cardano.Ledger.Constrained.Conway.Utxo where
 
 import Cardano.Ledger.Babbage.TxOut
 import Cardano.Ledger.BaseTypes
-import Cardano.Ledger.Conway.PParams
-import Cardano.Ledger.Mary.Value
 import Cardano.Ledger.Shelley.API.Types
-import Cardano.Ledger.UTxO
-import Data.Foldable
-import Data.Map qualified as Map
-import Data.Maybe
-import Data.Set qualified as Set
 import Data.Word
-import Lens.Micro
 
 import Constrained
 
-import Cardano.Ledger.Conway (ConwayEra)
-import Cardano.Ledger.Conway.Core (EraTx (..), ppMaxCollateralInputsL)
-import Cardano.Ledger.Crypto (StandardCrypto)
+import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
+import Cardano.Ledger.Binary.Coders (Decode (..), Encode (..), decode, encode, (!>), (<!))
+import Cardano.Ledger.CertState (
+  DRepState (..),
+  certDStateL,
+  certPStateL,
+  certVStateL,
+  dsUnifiedL,
+  psDepositsL,
+  vsDRepsL,
+ )
+import Cardano.Ledger.Conway (Conway, ConwayEra)
+import Cardano.Ledger.Conway.Core (
+  Era (..),
+  EraPParams (..),
+  EraTx,
+  EraTxAuxData (..),
+  EraTxBody (..),
+  EraTxWits (..),
+ )
+import Cardano.Ledger.Conway.Governance (GovActionId, Proposals, gasDeposit, pPropsL)
+import Cardano.Ledger.Conway.Tx (AlonzoTx)
+import Cardano.Ledger.Crypto (Crypto, StandardCrypto)
+import Cardano.Ledger.Shelley.Rules (Identity, epochFromSlot)
+import Cardano.Ledger.UMap (depositMap)
+import Control.DeepSeq (NFData)
+import Control.Monad.Reader (runReader)
+import Data.Bifunctor (Bifunctor (..))
+import qualified Data.Map.Strict as Map
+import qualified Data.OMap.Strict as OMap
+import GHC.Generics (Generic)
+import Lens.Micro ((^.))
+import Test.Cardano.Ledger.Babbage.Arbitrary ()
+import Test.Cardano.Ledger.Common (Arbitrary (..), ToExpr, oneof)
+import Test.Cardano.Ledger.Constrained.Conway.Gov (proposalsSpec)
 import Test.Cardano.Ledger.Constrained.Conway.Instances
-import Test.Cardano.Ledger.Constrained.Conway.PParams
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Conway.TreeDiff ()
+import Test.Cardano.Ledger.Core.Utils (testGlobals)
 
-utxoEnvSpec :: IsConwayUniv fn => Specification fn (UtxoEnv (ConwayEra StandardCrypto))
-utxoEnvSpec =
+data DepositPurpose c
+  = CredentialDeposit !(Credential 'Staking c)
+  | PoolDeposit !(KeyHash 'StakePool c)
+  | DRepDeposit !(Credential 'DRepRole c)
+  | GovActionDeposit !(GovActionId c)
+  deriving (Generic, Eq, Show, Ord)
+
+instance Crypto c => Arbitrary (DepositPurpose c) where
+  arbitrary =
+    oneof
+      [ CredentialDeposit <$> arbitrary
+      , PoolDeposit <$> arbitrary
+      , DRepDeposit <$> arbitrary
+      , GovActionDeposit <$> arbitrary
+      ]
+
+instance Crypto c => DecCBOR (DepositPurpose c) where
+  decCBOR =
+    decode . Summands "DepositPurpose" $
+      \case
+        0 -> SumD CredentialDeposit <! From
+        1 -> SumD PoolDeposit <! From
+        2 -> SumD DRepDeposit <! From
+        3 -> SumD GovActionDeposit <! From
+        k -> Invalid k
+
+instance Crypto c => EncCBOR (DepositPurpose c) where
+  encCBOR =
+    encode . \case
+      CredentialDeposit c -> Sum CredentialDeposit 0 !> To c
+      PoolDeposit kh -> Sum PoolDeposit 1 !> To kh
+      DRepDeposit c -> Sum DRepDeposit 2 !> To c
+      GovActionDeposit gaid -> Sum GovActionDeposit 3 !> To gaid
+
+instance Crypto c => NFData (DepositPurpose c)
+
+instance ToExpr (DepositPurpose c)
+
+utxoEnvSpec ::
+  IsConwayUniv fn =>
+  UtxoExecContext Conway ->
+  Specification fn (UtxoEnv (ConwayEra StandardCrypto))
+utxoEnvSpec UtxoExecContext {..} =
   constrained $ \utxoEnv ->
-    match utxoEnv $
-      \_ueSlot
-       uePParams
-       _ueCertState ->
-          [ satisfies uePParams pparamsSpec
-          , match uePParams $ \cpp ->
-              match cpp $
-                \_cppMinFeeA
-                 _cppMinFeeB
-                 _cppMaxBBSize
-                 cppMaxTxSize
-                 _cppMaxBHSize
-                 _cppKeyDeposit
-                 _cppPoolDeposit
-                 _cppEMax
-                 _cppNOpt
-                 _cppA0
-                 _cppRho
-                 _cppTau
-                 _cppProtocolVersion
-                 _cppMinPoolCost
-                 _cppCoinsPerUTxOByte
-                 _cppCostModels
-                 _cppPrices
-                 _cppMaxTxExUnits
-                 _cppMaxBlockExUnits
-                 _cppMaxValSize
-                 _cppCollateralPercentage
-                 _cppMaxCollateralInputs
-                 _cppPoolVotingThresholds
-                 _cppDRepVotingThresholds
-                 _cppCommitteeMinSize
-                 _cppCommitteeMaxTermLength
-                 _cppGovActionLifetime
-                 _cppGovActionDeposit
-                 _cppDRepDeposit
-                 _cppDRepActivity
-                 _cppMinFeeRefScriptCoinsPerByte ->
-                    -- NOTE: this is for testing only! We should figure out a nicer way
-                    -- of splitting generation and checking constraints here!
-                    [ assert $ lit (THKD 3000) ==. cppMaxTxSize
-                    ]
-          ]
+    utxoEnv ==. lit uecUtxoEnv
 
 utxoStateSpec ::
   IsConwayUniv fn =>
+  UtxoExecContext (ConwayEra StandardCrypto) ->
   UtxoEnv (ConwayEra StandardCrypto) ->
   Specification fn (UTxOState (ConwayEra StandardCrypto))
-utxoStateSpec _env =
+utxoStateSpec UtxoExecContext {uecUTxO} UtxoEnv {ueSlot, ueCertState} =
   constrained $ \utxoState ->
     match utxoState $
       \utxosUtxo
        _utxosDeposited
        _utxosFees
-       _utxosGovState
+       utxosGovState
        _utxosStakeDistr
        _utxosDonation ->
-          [ assert $ utxosUtxo /=. lit mempty
-          , match utxosUtxo $ \utxoMap ->
-              forAll (rng_ utxoMap) correctAddrAndWFCoin
+          [ assert $ utxosUtxo ==. lit uecUTxO
+          , match utxosGovState $ \props _ constitution _ _ _ _ ->
+              match constitution $ \_ policy ->
+                satisfies props $ proposalsSpec (lit curEpoch) policy ueCertState
           ]
+  where
+    curEpoch = runReader (epochFromSlot ueSlot) testGlobals
+
+data UtxoExecContext era = UtxoExecContext
+  { uecTx :: !(AlonzoTx era)
+  , uecUTxO :: !(UTxO era)
+  , uecUtxoEnv :: !(UtxoEnv era)
+  }
+  deriving (Generic)
+
+instance
+  ( EraTx era
+  , NFData (TxWits era)
+  , NFData (TxAuxData era)
+  ) =>
+  NFData (UtxoExecContext era)
+
+instance
+  ( EraTx era
+  , ToExpr (TxOut era)
+  , ToExpr (TxBody era)
+  , ToExpr (TxWits era)
+  , ToExpr (TxAuxData era)
+  , ToExpr (PParamsHKD Identity era)
+  ) =>
+  ToExpr (UtxoExecContext era)
+
+instance
+  ( EraPParams era
+  , EncCBOR (TxOut era)
+  , EncCBOR (TxBody era)
+  , EncCBOR (TxAuxData era)
+  , EncCBOR (TxWits era)
+  ) =>
+  EncCBOR (UtxoExecContext era)
+  where
+  encCBOR x@(UtxoExecContext _ _ _) =
+    let UtxoExecContext {..} = x
+     in encode $
+          Rec UtxoExecContext
+            !> To uecTx
+            !> To uecUTxO
+            !> To uecUtxoEnv
 
 utxoTxSpec ::
-  IsConwayUniv fn =>
-  UtxoEnv (ConwayEra StandardCrypto) ->
-  UTxOState (ConwayEra StandardCrypto) ->
-  Specification fn (Tx (ConwayEra StandardCrypto))
-utxoTxSpec env st =
-  constrained $ \tx ->
-    match tx $ \bdy _wits isValid _auxData ->
-      [ match isValid assert
-      , match bdy $
-          \ctbSpendInputs
-           ctbCollateralInputs
-           _ctbReferenceInputs
-           ctbOutputs
-           ctbCollateralReturn
-           _ctbTotalCollateral
-           _ctbCerts
-           ctbWithdrawals
-           ctbTxfee
-           ctbVldt
-           _ctbReqSignerHashes
-           _ctbMint
-           _ctbScriptIntegrityHash
-           _ctbAdHash
-           ctbTxNetworkId
-           _ctbVotingProcedures
-           ctbProposalProcedures
-           _ctbCurrentTreasuryValue
-           ctbTreasuryDonation ->
-              [ assert $ ctbSpendInputs /=. lit mempty
-              , assert $ ctbSpendInputs `subset_` lit (Map.keysSet $ unUTxO $ utxosUtxo st)
-              , match ctbWithdrawals $ \withdrawalMap ->
-                  forAll' (dom_ withdrawalMap) $ \net _ ->
-                    net ==. lit Testnet
-              , -- TODO: we need to do this for collateral as well?
-                match ctbProposalProcedures $ \proposalsList ->
-                  match ctbOutputs $ \outputList ->
-                    [ (reify ctbSpendInputs)
-                        ( \actualInputs ->
-                            fold
-                              [ c
-                              | i <- Set.toList actualInputs
-                              , BabbageTxOut _ (MaryValue c _) _ _ <- maybeToList . txinLookup i . utxosUtxo $ st
-                              ]
-                        )
-                        $ \totalValueConsumed ->
-                          [ let outputSum =
-                                  foldMap_
-                                    (maryValueCoin_ . txOutVal_ . sizedValue_)
-                                    outputList
-                                depositSum =
-                                  foldMap_
-                                    pProcDeposit_
-                                    proposalsList
-                             in outputSum + depositSum + ctbTxfee + ctbTreasuryDonation ==. totalValueConsumed
-                          ]
-                    , forAll outputList (flip onSized correctAddrAndWFCoin)
-                    ]
-              , match ctbVldt $ \before after ->
-                  [ onJust' before (<=. lit (ueSlot env))
-                  , onJust' after (lit (ueSlot env) <.)
-                  ]
-              , onJust' ctbTxNetworkId (==. lit Testnet)
-              , onJust' ctbCollateralReturn $ flip onSized correctAddrAndWFCoin
-              , assert $ size_ ctbCollateralInputs <=. lit (fromIntegral $ uePParams env ^. ppMaxCollateralInputsL)
-              ]
-      ]
+  ( IsConwayUniv fn
+  , HasSpec fn (AlonzoTx era)
+  ) =>
+  UtxoExecContext era ->
+  Specification fn (AlonzoTx era)
+utxoTxSpec UtxoExecContext {uecTx} =
+  constrained $ \tx -> tx ==. lit uecTx
 
 correctAddrAndWFCoin ::
   IsConwayUniv fn =>
@@ -177,4 +195,13 @@ correctAddrAndWFCoin txOut =
                 (branch $ \_ -> False)
                 (branch $ \_ -> True)
         )
+    ]
+
+depositsMap :: CertState era -> Proposals era -> Map.Map (DepositPurpose (EraCrypto era)) Coin
+depositsMap certState props =
+  Map.unions
+    [ Map.mapKeys CredentialDeposit $ depositMap (certState ^. certDStateL . dsUnifiedL)
+    , Map.mapKeys PoolDeposit $ certState ^. certPStateL . psDepositsL
+    , fmap drepDeposit . Map.mapKeys DRepDeposit $ certState ^. certVStateL . vsDRepsL
+    , Map.fromList . fmap (bimap GovActionDeposit gasDeposit) $ OMap.assocList (props ^. pPropsL)
     ]

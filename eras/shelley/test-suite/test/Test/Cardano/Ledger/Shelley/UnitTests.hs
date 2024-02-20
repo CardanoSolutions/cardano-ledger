@@ -345,7 +345,7 @@ addReward dp ra c = dp {certDState = ds {dsUnified = rewards'}}
 
 -- Any key deposit works in this test ^
 ledgerEnv :: LedgerEnv C
-ledgerEnv = LedgerEnv (SlotNo 0) minBound pp (AccountState (Coin 0) (Coin 0))
+ledgerEnv = LedgerEnv (SlotNo 0) minBound pp (AccountState (Coin 0) (Coin 0)) False
 
 testInvalidTx ::
   NonEmpty (PredicateFailure (ShelleyLEDGER C)) ->
@@ -476,7 +476,7 @@ testEmptyInputSet =
 testFeeTooSmall :: Assertion
 testFeeTooSmall =
   testInvalidTx
-    [UtxowFailure (UtxoFailure (FeeTooSmallUTxO (Coin 205) (Coin 1)))]
+    [UtxowFailure (UtxoFailure (FeeTooSmallUTxO $ Mismatch (Coin 1) (Coin 205)))]
     $ aliceGivesBobLovelace
       AliceToBob
         { input = TxIn genesisId minBound
@@ -504,7 +504,7 @@ testExpiredTx =
             , ttl = SlotNo 0
             , signers = [asWitness alicePay]
             }
-      ledgerEnv' = LedgerEnv (SlotNo 1) minBound pp (AccountState (Coin 0) (Coin 0))
+      ledgerEnv' = LedgerEnv (SlotNo 1) minBound pp (AccountState (Coin 0) (Coin 0)) False
    in testLEDGER ledgerState tx ledgerEnv' (Left errs)
 
 testInvalidWintess :: Assertion
@@ -637,7 +637,8 @@ testPoolCostTooSmall =
     [ DelegsFailure $
         DelplFailure $
           PoolFailure $
-            StakePoolCostTooLowPOOL (ppCost alicePoolParamsSmallCost) (pp @C ^. ppMinPoolCostL)
+            StakePoolCostTooLowPOOL $
+              Mismatch (ppCost alicePoolParamsSmallCost) (pp @C ^. ppMinPoolCostL)
     ]
     $ aliceGivesBobLovelace
     $ AliceToBob

@@ -7,6 +7,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
@@ -53,10 +54,8 @@ import Cardano.Ledger.Conway.TxCert (
  )
 import Cardano.Ledger.Shelley.API (
   CertState (..),
-  DState,
   PState (..),
   PoolEnv (PoolEnv),
-  VState,
  )
 import Cardano.Ledger.Shelley.Rules (PoolEvent, ShelleyPOOL, ShelleyPoolPredFailure)
 import Control.DeepSeq (NFData)
@@ -84,6 +83,17 @@ data CertEnv era = CertEnv
   , ceCommitteeProposals :: Map.Map (GovPurposeId 'CommitteePurpose era) (GovActionState era)
   }
   deriving (Generic)
+
+instance EraPParams era => EncCBOR (CertEnv era) where
+  encCBOR x@(CertEnv _ _ _ _ _) =
+    let CertEnv {..} = x
+     in encode $
+          Rec CertEnv
+            !> To ceSlotNo
+            !> To cePParams
+            !> To ceCurrentEpoch
+            !> To ceCurrentCommittee
+            !> To ceCommitteeProposals
 
 deriving instance EraPParams era => Eq (CertEnv era)
 deriving instance EraPParams era => Show (CertEnv era)
@@ -162,9 +172,9 @@ instance
 instance
   forall era.
   ( Era era
-  , State (EraRule "DELEG" era) ~ DState era
+  , State (EraRule "DELEG" era) ~ CertState era
   , State (EraRule "POOL" era) ~ PState era
-  , State (EraRule "GOVCERT" era) ~ VState era
+  , State (EraRule "GOVCERT" era) ~ CertState era
   , Environment (EraRule "DELEG" era) ~ ConwayDelegEnv era
   , Environment (EraRule "POOL" era) ~ PoolEnv era
   , Environment (EraRule "GOVCERT" era) ~ ConwayGovCertEnv era
@@ -189,9 +199,9 @@ instance
 
 certTransition ::
   forall era.
-  ( State (EraRule "DELEG" era) ~ DState era
+  ( State (EraRule "DELEG" era) ~ CertState era
   , State (EraRule "POOL" era) ~ PState era
-  , State (EraRule "GOVCERT" era) ~ VState era
+  , State (EraRule "GOVCERT" era) ~ CertState era
   , Environment (EraRule "DELEG" era) ~ ConwayDelegEnv era
   , Environment (EraRule "POOL" era) ~ PoolEnv era
   , Environment (EraRule "GOVCERT" era) ~ ConwayGovCertEnv era
@@ -205,22 +215,19 @@ certTransition ::
   ) =>
   TransitionRule (ConwayCERT era)
 certTransition = do
-  TRC (CertEnv slot pp currentEpoch committee committeeProposals, cState, c) <- judgmentContext
+  TRC (CertEnv slot pp currentEpoch committee committeeProposals, certState, c) <- judgmentContext
   let
-    CertState {certDState, certPState, certVState} = cState
+    CertState {certPState} = certState
     pools = psStakePoolParams certPState
   case c of
     ConwayTxCertDeleg delegCert -> do
-      newDState <- trans @(EraRule "DELEG" era) $ TRC (ConwayDelegEnv pp pools, certDState, delegCert)
-      pure $ cState {certDState = newDState}
+      trans @(EraRule "DELEG" era) $ TRC (ConwayDelegEnv pp pools, certState, delegCert)
     ConwayTxCertPool poolCert -> do
       newPState <- trans @(EraRule "POOL" era) $ TRC (PoolEnv slot pp, certPState, poolCert)
-      pure $ cState {certPState = newPState}
+      pure $ certState {certPState = newPState}
     ConwayTxCertGov govCert -> do
-      newVState <-
-        trans @(EraRule "GOVCERT" era) $
-          TRC (ConwayGovCertEnv pp currentEpoch committee committeeProposals, certVState, govCert)
-      pure $ cState {certVState = newVState}
+      trans @(EraRule "GOVCERT" era) $
+        TRC (ConwayGovCertEnv pp currentEpoch committee committeeProposals, certState, govCert)
 
 instance
   ( Era era

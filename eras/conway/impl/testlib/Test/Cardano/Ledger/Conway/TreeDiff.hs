@@ -126,8 +126,18 @@ instance
       (a, b) = finishDRepPulser x
 
 instance ToExpr (RatifyEnv era) where
-  toExpr (RatifyEnv stake pool drep dstate ep cs) =
-    App "RatifyEnv" [toExpr stake, toExpr pool, toExpr drep, toExpr dstate, toExpr ep, toExpr cs]
+  toExpr (RatifyEnv stake pool drep dstate ep cs delegatees poolps) =
+    App
+      "RatifyEnv"
+      [ toExpr stake
+      , toExpr pool
+      , toExpr drep
+      , toExpr dstate
+      , toExpr ep
+      , toExpr cs
+      , toExpr delegatees
+      , toExpr poolps
+      ]
 
 -- Rules/Gov
 instance (EraPParams era, ToExpr (PParamsHKD StrictMaybe era)) => ToExpr (ConwayGovPredFailure era)
@@ -191,12 +201,15 @@ instance
   ) =>
   ToExpr (ConwayNewEpochEvent era)
 
+instance ToExpr (ConwayHardForkEvent era)
+
 instance
   ( EraPParams era
   , ToExpr (PParams era)
   , ToExpr (PParamsHKD StrictMaybe era)
   , ToExpr (Event (EraRule "POOLREAP" era))
   , ToExpr (Event (EraRule "SNAP" era))
+  , ToExpr (Event (EraRule "HARDFORK" era))
   ) =>
   ToExpr (ConwayEpochEvent era)
 
@@ -204,6 +217,7 @@ instance
   ( ToExpr (Event (EraRule "CERTS" era))
   , ToExpr (Event (EraRule "UTXOW" era))
   , ToExpr (Event (EraRule "GOV" era))
+  , ToExpr (Event (EraRule "MEMPOOL" era))
   ) =>
   ToExpr (ConwayLedgerEvent era)
 
@@ -277,3 +291,5 @@ instance
   , ToExpr (Tx era)
   ) =>
   ToExpr (CertsEnv era)
+
+instance ToExpr (ConwayMempoolEvent era)

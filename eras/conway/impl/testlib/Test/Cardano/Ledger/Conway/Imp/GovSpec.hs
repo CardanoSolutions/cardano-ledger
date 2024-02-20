@@ -5,9 +5,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 
 module Test.Cardano.Ledger.Conway.Imp.GovSpec (
   spec,
@@ -33,6 +33,7 @@ import Cardano.Ledger.Shelley.Scripts (
 import Cardano.Ledger.Val (zero, (<->))
 import Data.Default.Class (Default (..))
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust)
 import qualified Data.OMap.Strict as OMap
@@ -57,7 +58,6 @@ spec = do
   proposalsWithVotingSpec
   votingSpec
   policySpec
-  networkIdWithdrawalsSpec
   predicateFailuresSpec
   unknownCostModelsSpec
 
@@ -68,6 +68,7 @@ relevantDuringBootstrapSpec ::
   ) =>
   SpecWith (ImpTestState era)
 relevantDuringBootstrapSpec = do
+  withdrawalsSpec
   hardForkSpec
   pparamUpdateSpec
   proposalsSpec
@@ -484,12 +485,13 @@ proposalsWithVotingSpec =
         fmap (!! 3) getProposalsForest
           `shouldReturn` Node (SJust p116) []
     it "Proposals are stored in the expected order" $ do
-      modifyPParams $
-        ppMaxValSizeL .~ 1_000_000_000
-      returnAddr <- registerRewardAccount
+      modifyPParams $ ppMaxValSizeL .~ 1_000_000_000
       deposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppGovActionDepositL
       ens <- getEnactState
-      withdrawals <- arbitrary
+      returnAddr <- registerRewardAccount
+      withdrawal <-
+        Map.singleton returnAddr . Coin . getPositive
+          <$> (arbitrary :: ImpTestM era (Positive Integer))
       let
         mkProp name action = do
           ProposalProcedure
@@ -501,7 +503,7 @@ proposalsWithVotingSpec =
         prop0 = mkProp "prop0" InfoAction
         prop1 = mkProp "prop1" $ NoConfidence (ens ^. ensPrevCommitteeL)
         prop2 = mkProp "prop2" InfoAction
-        prop3 = mkProp "prop3" $ TreasuryWithdrawals withdrawals SNothing
+        prop3 = mkProp "prop3" $ TreasuryWithdrawals withdrawal SNothing
       submitProposal_ prop0
       submitProposal_ prop1
       let
@@ -538,8 +540,7 @@ proposalsSpec = do
         [injectFailure $ VotersDoNotExist [StakePoolVoter poolId]]
       dRepCred <- KeyHashObj <$> freshKeyHash
       whenPostBootstrap $ do
-        submitFailingVote (DRepVoter dRepCred) gaId $
-          [injectFailure $ VotersDoNotExist [(DRepVoter dRepCred)]]
+        submitFailingVote (DRepVoter dRepCred) gaId [injectFailure $ VotersDoNotExist [DRepVoter dRepCred]]
     it "DRep votes are removed" $ do
       pp <- getsNES $ nesEsL . curPParamsEpochStateL
       gaId <- submitGovAction InfoAction
@@ -552,6 +553,29 @@ proposalsSpec = do
       gasAfterRemoval <- getGovActionState gaId
       gasDRepVotes gasAfterRemoval `shouldBe` []
   describe "Proposals" $ do
+    it "Predicate failure when proposal deposit has nonexistent return address" $ do
+      protVer <- getProtVer
+      registeredRewardAccount <- registerRewardAccount
+      unregisteredRewardAccount <- freshKeyHash >>= getRewardAccountFor . KeyHashObj
+      deposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppGovActionDepositL
+      anchor <- arbitrary
+      let mkProposal rewardAccount =
+            ProposalProcedure
+              { pProcDeposit = deposit
+              , pProcReturnAddr = rewardAccount
+              , pProcGovAction = InfoAction
+              , pProcAnchor = anchor
+              }
+      if HF.bootstrapPhase protVer
+        then do
+          submitProposal_ $ mkProposal registeredRewardAccount
+          submitProposal_ $ mkProposal unregisteredRewardAccount
+        else do
+          submitProposal_ $ mkProposal registeredRewardAccount
+          submitFailingProposal
+            (mkProposal unregisteredRewardAccount)
+            [ injectFailure $ ProposalReturnAccountDoesNotExist unregisteredRewardAccount
+            ]
     describe "Consistency" $ do
       it "Proposals submitted without proper parent fail" $ do
         let mkCorruptGovActionId :: GovActionId c -> GovActionId c
@@ -565,7 +589,7 @@ proposalsSpec = do
               [ Node () []
               ]
         pp <- getsNES $ nesEsL . curPParamsEpochStateL
-        khPropRwd <- freshKeyHash
+        rewardAccount <- registerRewardAccount
         let parameterChangeAction =
               ParameterChange
                 (SJust $ GovPurposeId $ mkCorruptGovActionId p1)
@@ -574,7 +598,7 @@ proposalsSpec = do
             parameterChangeProposal =
               ProposalProcedure
                 { pProcDeposit = pp ^. ppGovActionDepositL
-                , pProcReturnAddr = RewardAccount Testnet (KeyHashObj khPropRwd)
+                , pProcReturnAddr = rewardAccount
                 , pProcGovAction = parameterChangeAction
                 , pProcAnchor = def
                 }
@@ -814,9 +838,7 @@ votingSpec =
         modifyPParams $ ppGovActionLifetimeL .~ EpochInterval 2
         (drep, _, _) <- setupSingleDRep 1_000_000
         (govActionId, _) <- submitConstitution SNothing
-        passEpoch
-        passEpoch
-        passEpoch
+        passNEpochs 3
         submitFailingVote
           (DRepVoter drep)
           govActionId
@@ -860,6 +882,7 @@ votingSpec =
             & ppGovActionLifetimeL .~ EpochInterval 3
             & ppCommitteeMinSizeL .~ 2
         (dRepCred, _, _) <- setupSingleDRep 1_000_000
+        (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
         ccColdCred0 <- KeyHashObj <$> freshKeyHash
         ccColdCred1 <- KeyHashObj <$> freshKeyHash
         electionGovAction <-
@@ -871,6 +894,7 @@ votingSpec =
             ]
             (3 %! 5)
         submitYesVote_ (DRepVoter dRepCred) electionGovAction
+        submitYesVote_ (StakePoolVoter spoC) electionGovAction
         logAcceptedRatio electionGovAction
         passNEpochs 3
         expectNoCurrentProposals
@@ -1003,7 +1027,7 @@ constitutionSpec =
       impAnn "Pulser has not changed" $
         expectedPulser `shouldBe` initialPulser
 
-      passEpoch >> passEpoch
+      passNEpochs 2
       impAnn "Proposal gets removed after expiry" $ do
         govStateFinal <- getsNES newEpochStateGovStateL
         let ratifyState = extractDRepPulsingState (govStateFinal ^. cgsDRepPulsingStateL)
@@ -1118,51 +1142,107 @@ networkIdSpec =
               , raCredential = rewardCredential
               }
       propDeposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppGovActionDepositL
-      submitFailingProposal
-        ProposalProcedure
-          { pProcReturnAddr = badRewardAccount
-          , pProcGovAction = InfoAction
-          , pProcDeposit = propDeposit
-          , pProcAnchor = def
-          }
-        [ injectFailure $
-            ProposalProcedureNetworkIdMismatch
-              badRewardAccount
-              Testnet
-        ]
+      pv <- getProtVer
+      let proposal =
+            ProposalProcedure
+              { pProcReturnAddr = badRewardAccount
+              , pProcGovAction = InfoAction
+              , pProcDeposit = propDeposit
+              , pProcAnchor = def
+              }
+      if HF.bootstrapPhase pv
+        then
+          submitFailingProposal
+            proposal
+            [ injectFailure $
+                ProposalProcedureNetworkIdMismatch
+                  badRewardAccount
+                  Testnet
+            ]
+        else
+          submitFailingProposal
+            proposal
+            [ injectFailure $
+                ProposalReturnAccountDoesNotExist
+                  badRewardAccount
+            , injectFailure $
+                ProposalProcedureNetworkIdMismatch
+                  badRewardAccount
+                  Testnet
+            ]
 
-networkIdWithdrawalsSpec ::
+withdrawalsSpec ::
   forall era.
   ( ConwayEraImp era
   , InjectRuleFailure "LEDGER" ConwayGovPredFailure era
   ) =>
   SpecWith (ImpTestState era)
-networkIdWithdrawalsSpec =
-  describe "Network ID" $ do
+withdrawalsSpec =
+  describe "Withdrawals" $ do
+    it "Fails predicate when treasury withdrawal has nonexistent return address" $ do
+      policy <- getGovPolicy
+      unregisteredRewardAccount <- freshKeyHash >>= getRewardAccountFor . KeyHashObj
+      registeredRewardAccount <- registerRewardAccount
+      let genPositiveCoin = Coin . getPositive <$> arbitrary
+          withdrawalAccountDoesNotExist = TreasuryWithdrawalReturnAccountsDoNotExist [unregisteredRewardAccount]
+      withdrawals <-
+        sequence
+          [ (unregisteredRewardAccount,) <$> genPositiveCoin
+          , (registeredRewardAccount,) <$> genPositiveCoin
+          ]
+      expectPredFailures [withdrawalAccountDoesNotExist] [] $
+        TreasuryWithdrawals (Map.fromList withdrawals) policy
     it "Fails with invalid network ID in withdrawal addresses" $ do
-      rewardAccount <- registerRewardAccount
       rewardCredential <- KeyHashObj <$> freshKeyHash
       let badRewardAccount =
             RewardAccount
               { raNetwork = Mainnet -- Our network is Testnet
               , raCredential = rewardCredential
               }
-      propDeposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppGovActionDepositL
+          wdrls = TreasuryWithdrawals (Map.singleton badRewardAccount $ Coin 100_000_000) SNothing
+          idMismatch = TreasuryWithdrawalsNetworkIdMismatch (Set.singleton badRewardAccount) Testnet
+          returnAddress = TreasuryWithdrawalReturnAccountsDoNotExist [badRewardAccount]
+      expectPredFailures [returnAddress, idMismatch] [idMismatch] wdrls
+
+    it "Fails for empty withdrawals" $ do
+      rwdAccount1 <- registerRewardAccount
+      rwdAccount2 <- registerRewardAccount
+      let withdrawals = Map.fromList [(rwdAccount1, zero), (rwdAccount2, zero)]
+      let wdrls = TreasuryWithdrawals Map.empty SNothing
+       in expectPredFailures [ZeroTreasuryWithdrawals wdrls] [] wdrls
+
+      let wdrls = TreasuryWithdrawals [(rwdAccount1, zero)] SNothing
+       in expectPredFailures [ZeroTreasuryWithdrawals wdrls] [] wdrls
+
+      let wdrls = TreasuryWithdrawals withdrawals SNothing
+       in expectPredFailures [ZeroTreasuryWithdrawals wdrls] [] wdrls
+
+      rwdAccountRegistered <- registerRewardAccount
+      let wdrls = TreasuryWithdrawals [(rwdAccountRegistered, zero)] SNothing
+       in expectPredFailures [ZeroTreasuryWithdrawals wdrls] [] wdrls
+
+      curProtVer <- getProtVer
+      let wdrls = Map.insert rwdAccount2 (Coin 100_000) withdrawals
+          ga = TreasuryWithdrawals wdrls SNothing
+       in if HF.bootstrapPhase curProtVer
+            then do
+              expectPredFailures [] [] ga
+            else
+              submitGovAction_ ga
+  where
+    expectPredFailures ::
+      [ConwayGovPredFailure era] -> [ConwayGovPredFailure era] -> GovAction era -> ImpTestM era ()
+    expectPredFailures predFailures bootstrapPredFailures wdrl = do
+      curProtVer <- getProtVer
+      propP <- proposalWithRewardAccount wdrl
       submitFailingProposal
-        ProposalProcedure
-          { pProcReturnAddr = rewardAccount
-          , pProcGovAction =
-              TreasuryWithdrawals
-                (Map.singleton badRewardAccount $ Coin 100_000_000)
-                SNothing
-          , pProcDeposit = propDeposit
-          , pProcAnchor = def
-          }
-        [ injectFailure $
-            TreasuryWithdrawalsNetworkIdMismatch
-              (Set.singleton badRewardAccount)
-              Testnet
-        ]
+        propP
+        ( injectFailure
+            <$> ( if HF.bootstrapPhase curProtVer
+                    then DisallowedProposalDuringBootstrap propP NE.:| bootstrapPredFailures
+                    else NE.fromList predFailures
+                )
+        )
 
 proposalWithRewardAccount ::
   forall era.

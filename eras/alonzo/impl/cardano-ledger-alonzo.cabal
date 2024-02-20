@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               cardano-ledger-alonzo
-version:            1.10.2.0
+version:            1.11.0.0
 license:            Apache-2.0
 maintainer:         operations@iohk.io
 author:             IOHK
@@ -16,6 +16,7 @@ data-files:
     cddl-files/alonzo.cddl
     cddl-files/crypto.cddl
     cddl-files/extras.cddl
+    golden/*.cbor
 
 extra-source-files: CHANGELOG.md
 
@@ -43,8 +44,10 @@ library
         Cardano.Ledger.Alonzo.Tx
         Cardano.Ledger.Alonzo.TxAuxData
         Cardano.Ledger.Alonzo.TxBody
+        Cardano.Ledger.Alonzo.TxBody.Internal
         Cardano.Ledger.Alonzo.TxOut
         Cardano.Ledger.Alonzo.TxSeq
+        Cardano.Ledger.Alonzo.TxSeq.Internal
         Cardano.Ledger.Alonzo.TxWits
         Cardano.Ledger.Alonzo.UTxO
 
@@ -78,10 +81,10 @@ library
         cardano-data ^>=1.2.1,
         cardano-ledger-allegra ^>=1.6,
         cardano-crypto-class,
-        cardano-ledger-binary ^>=1.3,
-        cardano-ledger-core ^>=1.14,
+        cardano-ledger-binary ^>=1.4,
+        cardano-ledger-core ^>=1.15,
         cardano-ledger-mary ^>=1.7,
-        cardano-ledger-shelley ^>=1.13,
+        cardano-ledger-shelley >=1.14 && <1.15,
         cardano-slotting,
         cardano-strict-containers,
         containers,
@@ -90,7 +93,7 @@ library
         mtl,
         microlens,
         nothunks,
-        plutus-ledger-api ^>=1.32,
+        plutus-ledger-api >=1.33,
         set-algebra >=1.0,
         small-steps >=1.1,
         text,
@@ -115,6 +118,9 @@ library testlib
         Test.Cardano.Ledger.Alonzo.Imp.UtxowSpec.Invalid
         Test.Cardano.Ledger.Alonzo.ImpTest
         Test.Cardano.Ledger.Alonzo.TreeDiff
+        Test.Cardano.Ledger.Alonzo.Translation.TranslationInstance
+        Test.Cardano.Ledger.Alonzo.Translation.TranslatableGen
+        Test.Cardano.Ledger.Alonzo.Translation.Golden
 
     visibility:       public
     hs-source-dirs:   testlib
@@ -138,12 +144,32 @@ library testlib
         cardano-ledger-core:{cardano-ledger-core, testlib},
         cardano-ledger-shelley:{cardano-ledger-shelley, testlib},
         cardano-strict-containers,
+        cardano-slotting,
         plutus-ledger-api,
         generic-random,
         microlens,
         microlens-mtl,
+        serialise,
+        time,
+        HUnit,
         text,
-        tree-diff
+        tree-diff,
+        QuickCheck
+
+executable gen-golden
+    main-is:          GenerateGoldenFileMain.hs
+    hs-source-dirs:   test
+    other-modules:    Paths_cardano_ledger_alonzo
+    default-language: Haskell2010
+    ghc-options:
+        -Wall -Wcompat -Wincomplete-record-updates
+        -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+        -Wunused-packages
+
+    build-depends:
+        base,
+        cardano-ledger-alonzo,
+        testlib
 
 test-suite tests
     type:             exitcode-stdio-1.0
@@ -152,6 +178,8 @@ test-suite tests
     other-modules:
         Test.Cardano.Ledger.Alonzo.BinarySpec
         Test.Cardano.Ledger.Alonzo.Binary.CddlSpec
+        Test.Cardano.Ledger.Alonzo.GoldenTranslation
+        Paths_cardano_ledger_alonzo
 
     default-language: Haskell2010
     ghc-options:
@@ -165,4 +193,5 @@ test-suite tests
         cardano-ledger-alonzo,
         cardano-ledger-binary:testlib,
         cardano-ledger-core:{cardano-ledger-core, testlib},
-        testlib
+        testlib,
+        HUnit

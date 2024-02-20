@@ -23,6 +23,7 @@ library
         Test.Cardano.Ledger.Conformance
         Test.Cardano.Ledger.Conformance.ExecSpecRule.Core
         Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway
+        Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Base
 
     hs-source-dirs:   src
     other-modules:
@@ -35,7 +36,6 @@ library
         Test.Cardano.Ledger.Conformance.SpecTranslate.Conway.Certs
         Test.Cardano.Ledger.Conformance.SpecTranslate.Conway.Gov
         Test.Cardano.Ledger.Conformance.SpecTranslate.Conway.GovCert
-        Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Base
         Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Deleg
         Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Pool
         Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Cert
@@ -59,10 +59,12 @@ library
         data-default-class,
         microlens,
         mtl,
+        cardano-ledger-api:testlib,
         cardano-ledger-binary:{cardano-ledger-binary, testlib},
         cardano-ledger-core,
         cardano-ledger-shelley:{cardano-ledger-shelley, testlib},
         cardano-ledger-alonzo,
+        cardano-ledger-allegra,
         cardano-ledger-babbage,
         cardano-ledger-conway:{cardano-ledger-conway, testlib},
         cardano-ledger-executable-spec,
@@ -72,6 +74,9 @@ library
         containers,
         constrained-generators,
         deepseq,
+        filepath,
+        prettyprinter,
+        prettyprinter-ansi-terminal,
         small-steps >=1.1,
         text,
         unliftio,

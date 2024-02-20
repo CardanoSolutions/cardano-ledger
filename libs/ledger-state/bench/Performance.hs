@@ -32,7 +32,6 @@ import Data.Aeson
 import Data.Bifunctor (first)
 import Data.ByteString.Base16.Lazy as BSL16
 import Data.ByteString.Lazy (ByteString)
-import Data.Default.Class (def)
 import Data.Foldable as F
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -43,7 +42,7 @@ import Lens.Micro ((^.))
 import System.Environment (getEnv)
 import System.Random.Stateful
 import Test.Cardano.Ledger.Api.State.Query (getFilteredDelegationsAndRewardAccounts)
-import Test.Cardano.Ledger.Core.Arbitrary (uniformSubset)
+import Test.Cardano.Ledger.Core.Arbitrary (uniformSubSet)
 
 main :: IO ()
 main = do
@@ -55,9 +54,7 @@ main = do
 
   let toMempoolState :: NewEpochState CurrentEra -> MempoolState CurrentEra
       toMempoolState NewEpochState {nesEs = EpochState {esLState}} = esLState
-      pp :: PParams CurrentEra
-      pp = def
-      !globals = mkGlobals genesis pp
+      !globals = mkGlobals genesis
       !slotNo = SlotNo 55733343
       applyTx' mempoolEnv mempoolState =
         either (error . show) seqTuple
@@ -123,7 +120,7 @@ main = do
     , env (pure es) $ \newEpochState ->
         let umap = dsUnified . certDState . lsCertState . esLState $ nesEs newEpochState
             elems = umElems umap
-            creds = runStateGen_ stdGen (uniformSubset (Just 10) (Map.keysSet elems))
+            creds = runStateGen_ stdGen (uniformSubSet (Just 10) (Map.keysSet elems))
          in bgroup
               ( "GetFilteredDelegationsAndRewardAccounts ("
                   ++ show (Set.size creds)
@@ -241,11 +238,10 @@ validatedTx3 =
       \7120c2d3482751b14f06dd41d7ff023eeae6e63933b097c023c1ed19df6a061173c45aa\
       \54cceb568ff1886e2716e84e6260df5f6"
 
-mkGlobals :: ShelleyGenesis StandardCrypto -> PParams CurrentEra -> Globals
-mkGlobals genesis pp =
-  mkShelleyGlobals genesis epochInfoE majorPParamsVer
+mkGlobals :: ShelleyGenesis StandardCrypto -> Globals
+mkGlobals genesis =
+  mkShelleyGlobals genesis epochInfoE
   where
-    majorPParamsVer = pvMajor $ pp ^. ppProtocolVersionL
     epochInfoE =
       fixedEpochInfo
         (sgEpochLength genesis)

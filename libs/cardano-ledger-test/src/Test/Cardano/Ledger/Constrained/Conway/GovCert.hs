@@ -25,13 +25,25 @@ import Test.Cardano.Ledger.Constrained.Conway.PParams
 vStateSpec :: Specification fn (VState (ConwayEra StandardCrypto))
 vStateSpec = TrueSpec
 
+{- There are no hard constraints on VState, but sometimes when something fails we want to
+-- limit how big some of the fields of VState are. In that case one might use something
+-- like this. Note that genHint limits the size, but does not require an exact size.
+vStateSpec :: IsConwayUniv fn => Specification fn (VState (ConwayEra StandardCrypto))
+vStateSpec = constrained' $ \ [var|_dreps|] [var|_commstate|] [var|dormantepochs|] ->
+  [ genHint 5 dreps -- assert $ sizeOf_ dreps >=. 1
+  , match commstate $ \ [var|committeestate|] -> genHint 5 committeestate
+  , assert $ dormantepochs >=. lit (EpochNo 4)
+  ]
+-}
+
 govCertSpec ::
   IsConwayUniv fn =>
   ConwayGovCertEnv (ConwayEra StandardCrypto) ->
-  VState (ConwayEra StandardCrypto) ->
+  CertState (ConwayEra StandardCrypto) ->
   Specification fn (ConwayGovCert StandardCrypto)
-govCertSpec ConwayGovCertEnv {..} vs =
-  let reps = lit $ Map.keysSet $ vsDReps vs
+govCertSpec ConwayGovCertEnv {..} certState =
+  let vs = certVState certState
+      reps = lit $ Map.keysSet $ vsDReps vs
       deposits = Map.map drepDeposit (vsDReps vs)
       getNewMembers = \case
         UpdateCommittee _ _ newMembers _ -> Map.keysSet newMembers
@@ -55,11 +67,12 @@ govCertSpec ConwayGovCertEnv {..} vs =
               ]
           )
           -- ConwayUnRegDRep
-          ( branchW 3 $ \ [var|credUnreg|] [var|coinUnreg|] ->
-              assert $ elem_ (pair_ credUnreg coinUnreg) (lit (Map.toList deposits))
-          )
+          -- ( branchW 3 $ \ [var|credUnreg|] [var|coinUnreg|] ->
+          --     assert $ elem_ (pair_ credUnreg coinUnreg) (lit (Map.toList deposits))
+          -- )
+          (branchW 3 $ \_credUnreg _coinUnreg -> False)
           -- ConwayUpdateDRep
-          ( branchW 1 $ \keyupdate _ ->
+          ( branchW 1 $ \ [var|keyupdate|] _ ->
               member_ keyupdate reps
           )
           -- ConwayAuthCommitteeHotKey

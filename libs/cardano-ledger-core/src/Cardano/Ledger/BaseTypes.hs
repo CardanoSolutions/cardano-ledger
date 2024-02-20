@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
@@ -15,7 +14,6 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -76,6 +74,8 @@ module Cardano.Ledger.BaseTypes (
   Globals (..),
   epochInfoPure,
   ShelleyBase,
+  Relation (..),
+  Mismatch (..),
 
   -- * Injection
   Inject (..),
@@ -553,9 +553,18 @@ infix 1 ==>
 
 textSizeN :: MonadFail m => Int -> Text -> m Text
 textSizeN n t =
-  if BS.length (encodeUtf8 t) <= n
-    then pure t
-    else fail $ "Text exceeds " ++ show n ++ " bytes:" ++ show t
+  let len = BS.length (encodeUtf8 t)
+   in if len <= n
+        then pure t
+        else
+          fail $
+            "Text exceeds "
+              ++ show n
+              ++ " bytes:"
+              ++ show t
+              ++ "\n  Got "
+              ++ show len
+              ++ " bytes instead.\n"
 
 textDecCBOR :: Int -> Decoder s Text
 textDecCBOR n = decCBOR >>= textSizeN n
@@ -577,6 +586,7 @@ newtype Url = Url {urlToText :: Text}
   deriving newtype (EncCBOR, NFData, NoThunks, FromJSON, ToJSON)
 
 instance DecCBOR Url where
+  decCBOR :: Decoder s Url
   decCBOR =
     Url
       <$> ifDecoderVersionAtLeast
@@ -672,8 +682,6 @@ data Globals = Globals
   -- ^ Maximum number of KES iterations
   , quorum :: !Word64
   -- ^ Quorum for update system votes and MIR certificates
-  , maxMajorPV :: !Version
-  -- ^ All blocks invalid after this protocol version
   , maxLovelaceSupply :: !Word64
   -- ^ Maximum number of lovelace in the system
   , activeSlotCoeff :: !ActiveSlotCoeff
@@ -704,6 +712,44 @@ newtype EpochErr = EpochErr Text
 deriving instance Show EpochErr
 
 instance Exception EpochErr
+
+-- | Relationship descriptor for the expectation in the 'Mismatch' type.
+data Relation
+  = -- | Equal
+    RelEQ
+  | -- | Less then
+    RelLT
+  | -- | Greater then
+    RelGT
+  | -- | Less then or equal
+    RelLTEQ
+  | -- | Greater then or equal
+    RelGTEQ
+  | -- | Is subset of
+    RelSubset
+  deriving (Eq, Ord, Enum, Bounded, Show, Generic, NFData, ToJSON, FromJSON, NoThunks, Typeable)
+
+-- | This is intended to help clarify supplied and expected values reported by
+-- predicate-failures in all eras.
+data Mismatch (r :: Relation) a = Mismatch
+  { mismatchSupplied :: !a
+  , mismatchExpected :: !a
+  }
+  deriving (Eq, Ord, Show, Generic, NFData, ToJSON, FromJSON, NoThunks)
+
+instance (EncCBOR a, Typeable r) => EncCBOR (Mismatch r a) where
+  encCBOR (Mismatch supplied expected) =
+    encode $
+      Rec Mismatch
+        !> To supplied
+        !> To expected
+
+instance (DecCBOR a, Typeable r) => DecCBOR (Mismatch r a) where
+  decCBOR =
+    decode $
+      RecD Mismatch
+        <! From
+        <! From
 
 data Network
   = Testnet

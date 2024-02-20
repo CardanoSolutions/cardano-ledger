@@ -38,7 +38,7 @@ import Cardano.Ledger.Alonzo.Scripts as Alonzo (
   txscriptfee,
  )
 import Cardano.Ledger.Alonzo.Tx (
-  AlonzoTx (..),
+  AlonzoTx (AlonzoTx),
   IsValid (..),
   hashScriptIntegrity,
   totExUnits,
@@ -54,6 +54,7 @@ import Cardano.Ledger.Alonzo.TxWits (
   AlonzoTxWits (..),
   Redeemers (..),
   TxDats (..),
+  nullRedeemers,
  )
 import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded (..))
 import Cardano.Ledger.AuxiliaryData (AuxiliaryDataHash)
@@ -92,14 +93,17 @@ import Data.Proxy (Proxy (..))
 import Data.Ratio ((%))
 import Data.Sequence.Strict (StrictSeq ((:|>)))
 import qualified Data.Sequence.Strict as Seq (fromList)
-import Data.Set as Set
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Lens.Micro
+import Lens.Micro.Extras (view)
 import Numeric.Natural (Natural)
 import qualified PlutusLedgerApi.Common as P (Data (..))
 import System.Random
 import Test.Cardano.Ledger.AllegraEraGen (genValidityInterval)
 import Test.Cardano.Ledger.Alonzo.Arbitrary (alwaysFails, alwaysSucceeds, mkPlutusScript')
 import Test.Cardano.Ledger.Binary.Random
+import Test.Cardano.Ledger.Common (tracedDiscard)
 import Test.Cardano.Ledger.MaryEraGen (addTokens, genMint, maryGenesisValue, policyIndex)
 import Test.Cardano.Ledger.Plutus (zeroTestingCostModels)
 import Test.Cardano.Ledger.Plutus.Examples
@@ -118,7 +122,7 @@ import Test.Cardano.Ledger.Shelley.Generator.EraGen (EraGen (..), MinGenTxout (.
 import Test.Cardano.Ledger.Shelley.Generator.ScriptClass (Quantifier (..), ScriptClass (..))
 import Test.Cardano.Ledger.Shelley.Generator.Update (genM, genShelleyPParamsUpdate)
 import qualified Test.Cardano.Ledger.Shelley.Generator.Update as Shelley (genPParams)
-import Test.Cardano.Ledger.Shelley.Generator.Utxo (encodedLen, myDiscard)
+import Test.Cardano.Ledger.Shelley.Generator.Utxo (encodedLen)
 import Test.Cardano.Ledger.Shelley.Utils (unsafeBoundRational)
 import Test.QuickCheck hiding ((><))
 
@@ -316,9 +320,8 @@ genAlonzoPParamsUpdate constants pp = do
   coinPerWord <- genM (CoinPerWord . Coin <$> choose (1, 5))
   let genPrice = unsafeBoundRational . (% 100) <$> choose (0, 200)
   prices <- genM (Prices <$> genPrice <*> genPrice)
-  let maxTxExUnits = SNothing
-  -- maxTxExUnits <- genM (ExUnits <$> (choose (100, 5000)) <*> (choose (100, 5000)))
-  maxBlockExUnits <- genM (ExUnits <$> genNatural 100 5000 <*> genNatural 100 5000)
+  maxTxExUnits <- genM genMaxTxExUnits
+  maxBlockExUnits <- genM genMaxBlockExUnits
   -- Not too small for maxValSize, if this is too small then any Tx with Value
   -- that has lots of policyIds will fail. The Shelley Era uses hard coded 4000
   maxValSize <- genM (genNatural 4000 5000)
@@ -341,20 +344,16 @@ genAlonzoPParams ::
   Constants ->
   Gen (PParams (AlonzoEra c))
 genAlonzoPParams constants = do
-  let constants' = constants {minMajorPV = natVersion @5}
   -- This ensures that "_d" field is not 0, and that the major protocol version
   -- is large enough to not trigger plutus script failures
   -- (no bultins are alllowed before major version 5).
-  maryPP <- Shelley.genPParams @(MaryEra c) constants'
+  maryPP' <- Shelley.genPParams @(MaryEra c) constants
+  let maryPP = maryPP' & ppProtocolVersionL .~ ProtVer (natVersion @5) 0
+      prices = Prices minBound minBound
   coinPerWord <- CoinPerWord . Coin <$> choose (1, 5)
-  let prices = Prices minBound minBound
   -- prices <- Prices <$> (Coin <$> choose (100, 5000)) <*> (Coin <$> choose (100, 5000))
-  let maxTxExUnits = ExUnits (5 * bigMem + 1) (5 * bigStep + 1)
-  -- maxTxExUnits <- ExUnits <$> (choose (100, 5000)) <*> (choose (100, 5000))
-  maxBlockExUnits <-
-    ExUnits
-      <$> genNatural (20 * bigMem + 1) (30 * bigMem + 1)
-      <*> genNatural (20 * bigStep + 1) (30 * bigStep + 1)
+  maxTxExUnits <- genMaxTxExUnits
+  maxBlockExUnits <- genMaxBlockExUnits
   maxValSize <- genNatural 4000 10000 -- This can't be too small. Shelley uses Hard coded 4000
   let alonzoUpgrade =
         UpgradeAlonzoPParams
@@ -375,6 +374,20 @@ bigMem = 50000
 bigStep :: Natural
 bigStep = 99999
 
+genMaxTxExUnits :: Gen ExUnits
+genMaxTxExUnits =
+  ExUnits
+    -- Accommodate the maximum number of scripts in a transaction
+    <$> genNatural (10 * bigMem + 1) (20 * bigMem + 1)
+    <*> genNatural (10 * bigStep + 1) (20 * bigStep + 1)
+
+genMaxBlockExUnits :: Gen ExUnits
+genMaxBlockExUnits =
+  ExUnits
+    -- Accommodate the maximum number of scripts in all transactions in a block
+    <$> genNatural (60 * bigMem + 1) (100 * bigMem + 1)
+    <*> genNatural (60 * bigStep + 1) (100 * bigStep + 1)
+
 instance Mock c => EraGen (AlonzoEra c) where
   genEraAuxiliaryData = genAux
   genGenesisValue = maryGenesisValue
@@ -382,23 +395,33 @@ instance Mock c => EraGen (AlonzoEra c) where
   genEraTwoPhase2Arg = phase2scripts2Arg
 
   genEraTxBody = genAlonzoTxBody
-  updateEraTxBody utxo pp witnesses txb coinx txin txout = new
+  updateEraTxBody utxo pp wits txb coinx txin txout =
+    txb
+      { atbInputs = newInputs
+      , atbCollateral = newCollaterals
+      , atbTxFee = coinx
+      , atbOutputs = newOutputs
+      , -- The wits may have changed, recompute the scriptIntegrityHash.
+        atbScriptIntegrityHash =
+          hashScriptIntegrity
+            langViews
+            (wits ^. rdmrsTxWitsL)
+            (wits ^. datsTxWitsL)
+      }
     where
-      langs = langsUsed @(AlonzoEra c) (witnesses ^. scriptTxWitsL)
+      langs = langsUsed @(AlonzoEra c) (wits ^. scriptTxWitsL)
       langViews = Set.map (getLanguageView pp) langs
-      new =
-        txb
-          { atbInputs = atbInputs txb <> txin
-          , atbCollateral = atbCollateral txb <> Set.filter (okAsCollateral utxo) txin -- In Alonzo, extra inputs also are added to collateral
-          , atbTxFee = coinx
-          , atbOutputs = atbOutputs txb :|> txout
-          , -- The witnesses may have changed, recompute the scriptIntegrityHash.
-            atbScriptIntegrityHash =
-              hashScriptIntegrity
-                langViews
-                (witnesses ^. rdmrsTxWitsL)
-                (witnesses ^. datsTxWitsL)
-          }
+      requiredCollateral = ceiling $ fromIntegral (pp ^. ppCollateralPercentageL) * unCoin coinx % 100
+      potentialCollateral = Set.filter (okAsCollateral utxo) txin
+      txInAmounts = List.sortOn snd . Map.toList . Map.map (unCoin . view coinTxOutL) . unUTxO . txInsFilter utxo
+      takeUntilSum s = map fst . takeUntil ((s >=) . snd) . scanl1 (\(_, s') (x, n) -> (x, s' + n))
+      takeUntil p xs = let (y, n) = span p xs in y ++ take 1 n
+      newCollaterals =
+        if nullRedeemers (wits ^. rdmrsTxWitsL)
+          then mempty
+          else Set.fromList . takeUntilSum requiredCollateral $ txInAmounts potentialCollateral
+      newInputs = atbInputs txb <> txin
+      newOutputs = atbOutputs txb :|> txout
 
   addInputs txb txin = txb {atbInputs = atbInputs txb <> txin}
 
@@ -469,8 +492,8 @@ instance Mock c => EraGen (AlonzoEra c) where
           then
             if oldScriptWits == newWits
               then pure tx
-              else myDiscard "Random extra scriptwitness: genEraDone: AlonzoEraGen.hs"
-          else myDiscard "MinFee violation: genEraDone: AlonzoEraGen.hs"
+              else tracedDiscard $ "Random extra scriptwitness: genEraDone: " <> show newWits
+          else tracedDiscard $ "MinFee violation: genEraDone: " <> show theFee
 
   genEraTweakBlock pp txns =
     let txTotal, ppMax :: ExUnits
@@ -478,7 +501,12 @@ instance Mock c => EraGen (AlonzoEra c) where
         ppMax = pp ^. ppMaxBlockExUnitsL
      in if pointWiseExUnits (<=) txTotal ppMax
           then pure txns
-          else myDiscard "TotExUnits violation: genEraTweakBlock: AlonzoEraGen.hs"
+          else
+            tracedDiscard $
+              "TotExUnits violation: genEraTweakBlock: "
+                <> show (unWrapExUnits txTotal)
+                <> " instead of "
+                <> show (unWrapExUnits ppMax)
 
   hasFailedScripts tx = IsValid False == tx ^. isValidTxL
 

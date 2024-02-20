@@ -22,8 +22,10 @@ import Cardano.Ledger.Conway.PParams
 import Cardano.Ledger.Conway.Rules
 import Cardano.Ledger.Credential
 import Cardano.Ledger.Shelley.LedgerState
+import Cardano.Ledger.Shelley.Rules (ShelleyTickEvent (..))
 import Cardano.Ledger.Val (zero, (<->))
 import Control.Monad (forM)
+import Control.Monad.Writer (listen)
 import Control.State.Transition.Extended (STS (..))
 import Data.Default.Class (def)
 import Data.Foldable as F (foldl', traverse_)
@@ -32,6 +34,7 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Ratio ((%))
 import qualified Data.Sequence as Seq
+import Data.Typeable (cast)
 import Data.Word (Word64)
 import Lens.Micro
 import Test.Cardano.Ledger.Conway.ImpTest
@@ -46,6 +49,10 @@ spec ::
   , ToExpr (Event (EraRule "ENACT" era))
   , Eq (Event (EraRule "ENACT" era))
   , Typeable (Event (EraRule "ENACT" era))
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  , InjectRuleEvent "TICK" ConwayEpochEvent era
   ) =>
   SpecWith (ImpTestState era)
 spec = do
@@ -57,7 +64,13 @@ spec = do
   hardForkInitiationSpec
 
 relevantDuringBootstrapSpec ::
-  ConwayEraImp era =>
+  forall era.
+  ( ConwayEraImp era
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  , InjectRuleEvent "TICK" ConwayEpochEvent era
+  ) =>
   SpecWith (ImpTestState era)
 relevantDuringBootstrapSpec = do
   actionPrioritySpec
@@ -148,6 +161,7 @@ treasuryWithdrawalsSpec =
     it "Withdrawals exceeding treasury submitted in several proposals within the same epoch" $ do
       committeeCs <- registerInitialCommittee
       (drepC, _, _) <- setupSingleDRep 1_000_000
+      donateToTreasury $ Coin 5_000_000
       initialTreasury <- getTreasury
       numWithdrawals <- choose (1, 10)
       withdrawals <- genWithdrawalsExceeding initialTreasury numWithdrawals
@@ -192,7 +206,15 @@ treasuryWithdrawalsSpec =
       excess <- choose (minNeeded, val + 1)
       pure $ excess : amounts
 
-hardForkInitiationSpec :: ConwayEraImp era => SpecWith (ImpTestState era)
+hardForkInitiationSpec ::
+  forall era.
+  ( ConwayEraImp era
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  , InjectRuleEvent "TICK" ConwayEpochEvent era
+  ) =>
+  SpecWith (ImpTestState era)
 hardForkInitiationSpec =
   it "HardForkInitiation" $ do
     committeeMembers' <- registerInitialCommittee
@@ -213,15 +235,34 @@ hardForkInitiationSpec =
     submitYesVote_ (DRepVoter dRep1) govActionId
     submitYesVote_ (StakePoolVoter stakePoolId1) govActionId
     passNEpochs 2
+      & listen
+      >>= expectHardForkEvents . snd <*> pure []
     getProtVer `shouldReturn` curProtVer
     submitYesVote_ (DRepVoter dRep2) govActionId
     passNEpochs 2
+      & listen
+      >>= expectHardForkEvents . snd <*> pure []
     getProtVer `shouldReturn` curProtVer
     submitYesVote_ (StakePoolVoter stakePoolId2) govActionId
     passNEpochs 2
+      & listen
+      >>= expectHardForkEvents . snd
+        <*> pure
+          [ SomeSTSEvent @era @"TICK" . injectEvent $
+              HardForkEvent (ConwayHardForkEvent nextProtVer)
+          ]
+
     getProtVer `shouldReturn` nextProtVer
 
-hardForkInitiationNoDRepsSpec :: ConwayEraImp era => SpecWith (ImpTestState era)
+hardForkInitiationNoDRepsSpec ::
+  forall era.
+  ( ConwayEraImp era
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  , InjectRuleEvent "TICK" ConwayEpochEvent era
+  ) =>
+  SpecWith (ImpTestState era)
 hardForkInitiationNoDRepsSpec =
   it "HardForkInitiation without DRep voting" $ do
     committeeMembers' <- registerInitialCommittee
@@ -237,9 +278,17 @@ hardForkInitiationNoDRepsSpec =
     submitYesVoteCCs_ committeeMembers' govActionId
     submitYesVote_ (StakePoolVoter stakePoolId1) govActionId
     passNEpochs 2
+      & listen
+      >>= expectHardForkEvents . snd <*> pure []
     getProtVer `shouldReturn` curProtVer
     submitYesVote_ (StakePoolVoter stakePoolId2) govActionId
     passNEpochs 2
+      & listen
+      >>= expectHardForkEvents . snd
+        <*> pure
+          [ SomeSTSEvent @era @"TICK" . injectEvent $
+              HardForkEvent (ConwayHardForkEvent nextProtVer)
+          ]
     getProtVer `shouldReturn` nextProtVer
 
 pparamPredictionSpec :: ConwayEraImp era => SpecWith (ImpTestState era)
@@ -485,3 +534,23 @@ actionPrioritySpec =
       getsNES (nesEsL . curPParamsEpochStateL . ppMinFeeAL)
         `shouldReturn` val1
       expectNoCurrentProposals
+
+expectHardForkEvents ::
+  forall era.
+  ( ConwayEraImp era
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  ) =>
+  [SomeSTSEvent era] ->
+  [SomeSTSEvent era] ->
+  ImpTestM era ()
+expectHardForkEvents actual expected =
+  filter isHardForkEvent actual `shouldBeExpr` expected
+  where
+    isHardForkEvent (SomeSTSEvent ev)
+      | Just
+          (TickNewEpochEvent (EpochEvent (HardForkEvent (ConwayHardForkEvent _))) :: ShelleyTickEvent era) <-
+          cast ev =
+          True
+      | otherwise = False

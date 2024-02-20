@@ -19,9 +19,9 @@ import Cardano.Ledger.Api.State.Query (
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin
 import Cardano.Ledger.Conway.Governance (
-  Committee (..),
-  ConwayEraGov (..),
   GovAction (..),
+  GovPurposeId (..),
+  Voter (StakePoolVoter),
  )
 import Cardano.Ledger.Conway.PParams (ppDRepActivityL)
 import Cardano.Ledger.Core
@@ -30,8 +30,7 @@ import Cardano.Ledger.DRep
 import Cardano.Ledger.Keys (KeyRole (..))
 import qualified Cardano.Ledger.Shelley.HardForks as HF
 import Cardano.Ledger.Shelley.LedgerState
-import Data.Default (def)
-import Data.Foldable (Foldable (..))
+import Data.Default.Class (def)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Lens.Micro
@@ -183,17 +182,19 @@ spec = do
     it "members should remain authorized if authorized during the epoch after their election" $
       whenPostBootstrap $ do
         (drep, _, _) <- setupSingleDRep 1_000_000
+        (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
 
         c1 <- KeyHashObj <$> freshKeyHash
         c1Expiry <- flip addEpochInterval (EpochInterval 10) <$> getsNES nesELL
 
         initialCommitteeMembers <- getCommitteeMembers
-        _ <-
+        GovPurposeId gid <-
           electCommittee
             SNothing
             drep
             initialCommitteeMembers
             [(c1, c1Expiry)]
+        submitYesVote_ (StakePoolVoter spoC) gid
 
         passEpoch
         hk1 <- registerCommitteeHotKey c1
@@ -205,6 +206,7 @@ spec = do
 
   it "Committee queries" $ whenPostBootstrap $ do
     (drep, _, _) <- setupSingleDRep 1_000_000
+    (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
     curEpochNo <- getsNES nesELL
     let offsetEpochInterval n = addEpochInterval curEpochNo (EpochInterval n)
     let cExpiry n =
@@ -227,12 +229,13 @@ spec = do
           ]
     initialMembers <- getCommitteeMembers
 
-    ga1 <-
+    ga1@(GovPurposeId gaid1) <-
       electCommittee
         SNothing
         drep
         initialMembers
         newMembers
+    submitYesVote_ (StakePoolVoter spoC) gaid1
 
     expectMembers initialMembers
     passNEpochs 2 -- epoch 2
@@ -306,7 +309,7 @@ spec = do
         c4NewExpiry = offsetEpochInterval 4
         c6Expiry = offsetEpochInterval 6
         c7Expiry = offsetEpochInterval 7
-    ga2 <-
+    ga2@(GovPurposeId gaid2) <-
       electCommittee
         (SJust ga1)
         drep
@@ -316,6 +319,7 @@ spec = do
         , (c6, c6Expiry)
         , (c7, c7Expiry)
         ]
+    submitYesVote_ (StakePoolVoter spoC) gaid2
     passEpoch -- epoch 4
     hk6 <- registerCommitteeHotKey c6
     hk8 <- registerCommitteeHotKey c8
@@ -375,7 +379,7 @@ spec = do
     let c3NewExpiry = offsetEpochInterval 9
         c4NewNewExpiry = offsetEpochInterval 9
         c6NewExpiry = offsetEpochInterval 9
-    _ <-
+    GovPurposeId gaid3 <-
       electCommittee
         (SJust ga2)
         drep
@@ -384,6 +388,7 @@ spec = do
         , (c4, c4NewNewExpiry)
         , (c6, c6NewExpiry)
         ]
+    submitYesVote_ (StakePoolVoter spoC) gaid3
     passEpoch -- epoch 7
     -- members whose term changed have next epoch change `TermAdjusted`
     expectNoFilterQueryResult
@@ -415,15 +420,6 @@ spec = do
       , (c7, CommitteeMemberState MemberNotAuthorized Expired (Just c7Expiry) NoChangeExpected)
       ]
   where
-    expectMembers ::
-      HasCallStack => Set.Set (Credential 'ColdCommitteeRole (EraCrypto era)) -> ImpTestM era ()
-    expectMembers expKhs = do
-      committee <-
-        getsNES $
-          nesEsL . esLStateL . lsUTxOStateL . utxosGovStateL . committeeGovStateL
-      let members = Map.keysSet $ foldMap' committeeMembers committee
-      impAnn "Expecting committee members" $ members `shouldBe` expKhs
-
     expectQueryResult ::
       HasCallStack =>
       Set.Set (Credential 'ColdCommitteeRole (EraCrypto era)) ->

@@ -135,7 +135,6 @@ module Cardano.Ledger.Conway.Governance (
   epochStateIncrStakeDistrL,
   epochStateRegDrepL,
   epochStateUMapL,
-  reDRepDistrL,
   pulseDRepPulsingState,
   completeDRepPulsingState,
   extractDRepPulsingState,
@@ -155,12 +154,20 @@ module Cardano.Ledger.Conway.Governance (
   RunConwayRatify (..),
   govStatePrevGovActionIds,
   mkEnactState,
+  ratifySignalL,
+  reStakeDistrL,
+  reStakePoolDistrL,
+  reDRepDistrL,
+  reDRepStateL,
+  reCurrentEpochL,
+  reCommitteeStateL,
 
   -- * Exported for testing
   pparamsUpdateThreshold,
   TreeMaybe (..),
   toGovRelationTree,
   toGovRelationTreeEither,
+  showGovActionType,
 ) where
 
 import Cardano.Ledger.BaseTypes (
@@ -204,13 +211,12 @@ import Cardano.Ledger.Shelley.LedgerState (
   credMap,
   dsUnified,
   epochStateGovStateL,
+  epochStatePoolParamsL,
   epochStateTreasuryL,
   esLStateL,
   lsCertState,
   lsUTxOState,
-  lsUTxOStateL,
-  nesEsL,
-  utxosGovStateL,
+  newEpochStateGovStateL,
   utxosStakeDistr,
   vsCommitteeState,
   vsDReps,
@@ -279,7 +285,7 @@ govStatePrevGovActionIds = view $ proposalsGovStateL . pRootsL . to toPrevGovAct
 
 conwayGovStateDRepDistrG ::
   SimpleGetter (ConwayGovState era) (Map (DRep (EraCrypto era)) (CompactForm Coin))
-conwayGovStateDRepDistrG = to (\govst -> (psDRepDistr . fst) $ finishDRepPulser (cgsDRepPulsingState govst))
+conwayGovStateDRepDistrG = to (psDRepDistr . fst . finishDRepPulser . cgsDRepPulsingState)
 
 getRatifyState :: ConwayGovState era -> RatifyState era
 getRatifyState (ConwayGovState {cgsDRepPulsingState}) = snd $ finishDRepPulser cgsDRepPulsingState
@@ -414,10 +420,10 @@ instance Crypto c => ConwayEraGov (ConwayEra c) where
 newEpochStateDRepPulsingStateL ::
   ConwayEraGov era => Lens' (NewEpochState era) (DRepPulsingState era)
 newEpochStateDRepPulsingStateL =
-  nesEsL . esLStateL . lsUTxOStateL . utxosGovStateL . drepPulsingStateGovStateL
+  newEpochStateGovStateL . drepPulsingStateGovStateL
 
 epochStateDRepPulsingStateL :: ConwayEraGov era => Lens' (EpochState era) (DRepPulsingState era)
-epochStateDRepPulsingStateL = esLStateL . lsUTxOStateL . utxosGovStateL . drepPulsingStateGovStateL
+epochStateDRepPulsingStateL = epochStateGovStateL . drepPulsingStateGovStateL
 
 setCompleteDRepPulsingState ::
   GovState era ~ ConwayGovState era =>
@@ -487,6 +493,7 @@ setFreshDRepPulsingState epochNo stakePoolDistr epochState = do
                     , dpProposals = proposalsActions props
                     , dpProposalDeposits = proposalsDeposits props
                     , dpGlobals = globals
+                    , dpPoolParams = epochState ^. epochStatePoolParamsL
                     }
                 )
   pure $ epochState & epochStateGovStateL .~ govState'

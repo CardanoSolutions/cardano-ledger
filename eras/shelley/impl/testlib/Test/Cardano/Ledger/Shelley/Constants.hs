@@ -7,7 +7,6 @@ module Test.Cardano.Ledger.Shelley.Constants (
 )
 where
 
-import Cardano.Ledger.BaseTypes (Version, natVersion)
 import Cardano.Ledger.Coin (Coin (..))
 import Data.Word (Word64)
 
@@ -56,16 +55,16 @@ data Constants = Constants
   -- ^ minimal number of genesis UTxO outputs
   , maxGenesisUTxOouts :: Int
   -- ^ maximal number of genesis UTxO outputs
-  , maxCertsPerTx :: Word64
-  -- ^ maximal number of certificates per transaction
-  , maxTxsPerBlock :: Word64
-  -- ^ maximal number of Txs per block
-  , maxNumKeyPairs :: Word64
-  -- ^ maximal numbers of generated keypairs
   , minGenesisOutputVal :: Integer
   -- ^ minimal coin value for generated genesis outputs
   , maxGenesisOutputVal :: Integer
   -- ^ maximal coin value for generated genesis outputs
+  , maxCertsPerTx :: Word64
+  -- ^ maximal number of certificates per transaction
+  , maxTxsPerBlock :: Word64
+  -- ^ maximal number of Txs per block
+  , numKeyPairs :: Word64
+  -- ^ Number of generated keypairs
   , numBaseScripts :: Int
   -- ^ Number of base scripts from which multi sig scripts are built.
   , numSimpleScripts :: Int
@@ -93,8 +92,6 @@ data Constants = Constants
   , maxTreasury :: Integer
   , minReserves :: Integer
   , maxReserves :: Integer
-  , minMajorPV :: Version
-  , maxMajorPV :: Version
   , genTxStableUtxoSize :: Int
   -- ^ When generating Tx, we want the UTxO size to fluctuate around this point. If
   --   it gets too small, we can't balance the fee, too large it gets too complicated.
@@ -123,13 +120,13 @@ defaultConstants =
     , frequencyKeyCredDelegation = 2
     , frequencyTxUpdates = 10
     , frequencyTxWithMetadata = 10
-    , minGenesisUTxOouts = 10
-    , maxGenesisUTxOouts = 100
-    , maxCertsPerTx = 3
-    , maxTxsPerBlock = 10
-    , maxNumKeyPairs = 150
+    , minGenesisUTxOouts = 100
+    , maxGenesisUTxOouts = 150
     , minGenesisOutputVal = 1000000
     , maxGenesisOutputVal = 100000000
+    , maxCertsPerTx = 3
+    , maxTxsPerBlock = 10
+    , numKeyPairs = 200 -- Must be >= maxGenesisUTxOouts
     , numBaseScripts = 3
     , numSimpleScripts = 20
     , frequencyNoWithdrawals = 75
@@ -146,8 +143,6 @@ defaultConstants =
     , maxTreasury = 10000000
     , minReserves = 1000000
     , maxReserves = 10000000
-    , minMajorPV = natVersion @2
-    , maxMajorPV = maxBound
-    , genTxStableUtxoSize = 100
+    , genTxStableUtxoSize = 125 -- Needs to be between minGenesisUTxOouts and maxGenesisUTxOouts
     , genTxUtxoIncrement = 3
     }

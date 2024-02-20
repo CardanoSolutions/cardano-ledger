@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               cardano-ledger-babbage
-version:            1.9.0.0
+version:            1.10.0.0
 license:            Apache-2.0
 maintainer:         operations@iohk.io
 author:             IOHK
@@ -18,6 +18,7 @@ data-files:
     cddl-files/babbage.cddl
     cddl-files/crypto.cddl
     cddl-files/extras.cddl
+    golden/*.cbor
 
 extra-source-files: CHANGELOG.md
 
@@ -36,6 +37,7 @@ library
         Cardano.Ledger.Babbage.Scripts
         Cardano.Ledger.Babbage.Tx
         Cardano.Ledger.Babbage.TxBody
+        Cardano.Ledger.Babbage.TxBody.Internal
         Cardano.Ledger.Babbage.TxOut
         Cardano.Ledger.Babbage.TxInfo
         Cardano.Ledger.Babbage.TxWits
@@ -73,17 +75,17 @@ library
         cardano-crypto-class,
         cardano-data >=1.2,
         cardano-ledger-allegra ^>=1.6,
-        cardano-ledger-alonzo >=1.9 && <1.11,
-        cardano-ledger-binary ^>=1.3,
-        cardano-ledger-core ^>=1.14,
+        cardano-ledger-alonzo >=1.11 && <1.12,
+        cardano-ledger-binary >=1.4,
+        cardano-ledger-core ^>=1.15,
         cardano-ledger-mary ^>=1.7,
-        cardano-ledger-shelley ^>=1.13,
+        cardano-ledger-shelley ^>=1.14,
         cardano-strict-containers,
         containers,
         deepseq,
         microlens,
         nothunks,
-        plutus-ledger-api ^>=1.32,
+        plutus-ledger-api >=1.33,
         set-algebra,
         small-steps >=1.1,
         text,
@@ -98,6 +100,7 @@ library testlib
         Test.Cardano.Ledger.Babbage.Imp.UtxowSpec
         Test.Cardano.Ledger.Babbage.ImpTest
         Test.Cardano.Ledger.Babbage.TreeDiff
+        Test.Cardano.Ledger.Babbage.Translation.TranslatableGen
 
     visibility:       public
     hs-source-dirs:   testlib
@@ -118,10 +121,27 @@ library testlib
         cardano-ledger-binary,
         cardano-ledger-core:{cardano-ledger-core, testlib} >=1.13.2,
         cardano-strict-containers,
+        containers,
         generic-random,
         microlens,
         small-steps >=1.1,
         QuickCheck
+
+executable gen-golden
+    main-is:          GenerateGoldenFileMain.hs
+    hs-source-dirs:   test
+    other-modules:    Paths_cardano_ledger_babbage
+    default-language: Haskell2010
+    ghc-options:
+        -Wall -Wcompat -Wincomplete-record-updates
+        -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+        -Wunused-packages
+
+    build-depends:
+        base,
+        cardano-ledger-alonzo:testlib,
+        cardano-ledger-babbage,
+        testlib
 
 test-suite tests
     type:             exitcode-stdio-1.0
@@ -130,6 +150,8 @@ test-suite tests
     other-modules:
         Test.Cardano.Ledger.Babbage.BinarySpec
         Test.Cardano.Ledger.Babbage.Binary.CddlSpec
+        Test.Cardano.Ledger.Babbage.GoldenTranslation
+        Paths_cardano_ledger_babbage
 
     default-language: Haskell2010
     ghc-options:
@@ -147,4 +169,5 @@ test-suite tests
         cardano-ledger-core:testlib,
         cardano-ledger-alonzo:testlib,
         data-default-class,
+        HUnit,
         testlib

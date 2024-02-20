@@ -73,6 +73,7 @@ import Cardano.Ledger.BaseTypes (
   EpochInterval (..),
   EpochNo (..),
   FixedPoint,
+  Mismatch (..),
   Network (..),
   Nonce (..),
   ProtVer (..),
@@ -219,7 +220,6 @@ import Cardano.Ledger.Shelley.Rules (
   LedgerEnv (..),
   PoolEnv (..),
   ShelleyLedgerPredFailure (..),
-  UpecPredFailure,
   UtxoEnv (..),
  )
 import Cardano.Ledger.Shelley.Rules as Shelley (
@@ -231,13 +231,11 @@ import Cardano.Ledger.Shelley.Rules as Shelley (
   ShelleyEpochPredFailure (..),
   ShelleyLedgersPredFailure (..),
   ShelleyNewEpochPredFailure (..),
-  ShelleyNewppPredFailure (..),
   ShelleyPoolPredFailure (..),
   ShelleyPoolreapPredFailure,
   ShelleyPpupPredFailure (..),
   ShelleySnapPredFailure,
   ShelleyTickPredFailure (..),
-  ShelleyUpecPredFailure (..),
   ShelleyUtxoPredFailure (..),
   ShelleyUtxowPredFailure (..),
  )
@@ -258,6 +256,7 @@ import Cardano.Ledger.Shelley.TxWits (ShelleyTxWits (..))
 import Cardano.Ledger.Shelley.UTxO (ShelleyScriptsNeeded (..))
 import Cardano.Ledger.TxIn (TxId (..), TxIn (..))
 import Cardano.Ledger.UMap (
+  RDPair (..),
   dRepMap,
   depositMap,
   fromCompact,
@@ -1303,18 +1302,6 @@ ppEPOCH Alonzo x = ppShelleyEpochPredFailure x
 ppEPOCH Babbage x = ppShelleyEpochPredFailure x
 ppEPOCH Conway _ = ppString "PredicateFailure (ConwayEPOCH era) = Void, and can never Fail"
 
--- | A bit different since it is NOT of the form: PredicateFailure (EraRule "UPEC" era)
---   but instead, the type family UpecPredFailurePV pv era
---   where, type UpecPredFailure era = UpecPredFailurePV (ProtVerLow era) era
---   But the effect is still the same. The Proof era, fixes the type family result.
-ppUPEC :: Proof era -> UpecPredFailure era -> PDoc
-ppUPEC Shelley x = ppUpecPredicateFailure x
-ppUPEC Mary x = ppUpecPredicateFailure x
-ppUPEC Alonzo x = ppUpecPredicateFailure x
-ppUPEC Allegra x = ppUpecPredicateFailure x
-ppUPEC Babbage x = ppUpecPredicateFailure x
-ppUPEC Conway x = absurd x
-
 -- | A bit different since it is NOT of the form: PredicateFailure (EraRule "LEDGERS" era)
 --   but instead:  State (EraRule "LEDGERS" era)
 --   But the effect is still the same. The Proof era, fixes the type family result.
@@ -1460,7 +1447,7 @@ instance Reflect era => PrettyA (ShelleyLedgersPredFailure era) where
 
 ppConwayLedgerPredFailure :: Reflect era => Proof era -> ConwayLedgerPredFailure era -> PDoc
 ppConwayLedgerPredFailure proof x = case x of
-  ConwayWdrlNotDelegatedToDRep s -> ppSexp "ConwayWdrlNotDelegatedToDRep" [ppSet pcCredential s]
+  ConwayWdrlNotDelegatedToDRep s -> ppSexp "ConwayWdrlNotDelegatedToDRep" [prettyA s]
   ConwayTreasuryValueMismatch c1 c2 -> ppSexp "ConwayTreasuryValueMismatch" [pcCoin c1, pcCoin c2]
   ConwayGovFailure y -> case proof of
     Conway -> ppSexp "ConwayGovFailure" [ppConwayGovPredFailure y]
@@ -1468,13 +1455,6 @@ ppConwayLedgerPredFailure proof x = case x of
       error
         ("Only the ConwayEra has a (PredicateFailure (EraRule \"GOV\" era)). This Era is " ++ show proof)
   ConwayUtxowFailure y -> ppUTXOW proof y
-  {- case proof of -- (PredicateFailure (EraRule "UTXOW" era))
-    Shelley -> ppShelleyUtxowPredFailure y
-    Allegra -> ppShelleyUtxowPredFailure y
-    Mary -> ppShelleyUtxowPredFailure y
-    Alonzo -> ppAlonzoUtxowPredFailure y
-    Babbage -> ppBabbageUtxowPredFailure proof y
-    Conway -> ppBabbageUtxowPredFailure proof y -}
   ConwayCertsFailure pf -> case proof of
     Conway -> ppConwayCertsPredFailure proof pf
     _ ->
@@ -1486,6 +1466,8 @@ ppConwayLedgerPredFailure proof x = case x of
       [ ("Computed sum of reference script size", ppInt s1)
       , ("Maximum allowed total reference script size", ppInt s2)
       ]
+  ConwayMempoolFailure t ->
+    ppSexp "ConwayMempoolFailure" [text t]
 
 instance Reflect era => PrettyA (ConwayLedgerPredFailure era) where
   prettyA = ppConwayLedgerPredFailure reify
@@ -1551,6 +1533,9 @@ ppConwayGovPredFailure x = case x of
     ppSexp "DisallowedProposalDuringBootstrap" [pcProposalProcedure p]
   DisallowedVotesDuringBootstrap m -> ppSexp "DisallowedVotesDuringBootstrap" [prettyA m]
   VotersDoNotExist m -> ppSexp "VotersDoNotExist" [prettyA m]
+  ZeroTreasuryWithdrawals ga -> ppSexp "ZeroTreasuryWithdrawals" [pcGovAction ga]
+  ProposalReturnAccountDoesNotExist a -> ppSexp "ProposalReturnAccountDoesNotExist" [prettyA a]
+  TreasuryWithdrawalReturnAccountsDoNotExist a -> ppSexp "TreasuryWithdrawalReturnAccountsDoNotExist" [prettyA a]
 
 instance PrettyA (ConwayGovPredFailure era) where
   prettyA = ppConwayGovPredFailure
@@ -1643,17 +1628,17 @@ instance
 -- ================
 
 ppBbodyPredicateFailure :: forall era. Reflect era => ShelleyBbodyPredFailure era -> PDoc
-ppBbodyPredicateFailure (WrongBlockBodySizeBBODY x y) =
+ppBbodyPredicateFailure (WrongBlockBodySizeBBODY (Mismatch supplied expected)) =
   ppRecord
     "WrongBlockBodySizeBBODY"
-    [ ("actual computed BBody size", ppInt x)
-    , ("claimed BBody Size in Header", ppInt y)
+    [ ("actual computed BBody size", ppInt supplied)
+    , ("claimed BBody Size in Header", ppInt expected)
     ]
-ppBbodyPredicateFailure (InvalidBodyHashBBODY h1 h2) =
+ppBbodyPredicateFailure (InvalidBodyHashBBODY (Mismatch supplied expected)) =
   ppRecord
     "(InvalidBodyHashBBODY"
-    [ ("actual hash", ppHash h1)
-    , ("claimed hash", ppHash h2)
+    [ ("actual hash", ppHash supplied)
+    , ("claimed hash", ppHash expected)
     ]
 ppBbodyPredicateFailure (LedgersFailure x) =
   ppSexp "LedgersFailure" [ppLEDGERS @era reify x]
@@ -1739,12 +1724,13 @@ instance PrettyA (ConwayNewEpochPredFailure era) where
 
 -- ===============
 
-ppShelleyEpochPredFailure :: forall era. Reflect era => ShelleyEpochPredFailure era -> PDoc
+ppShelleyEpochPredFailure :: forall era. ShelleyEpochPredFailure era -> PDoc
 ppShelleyEpochPredFailure (PoolReapFailure _) =
   ppString "PoolreapPredicateFailure has no constructors"
 ppShelleyEpochPredFailure (SnapFailure _) =
   ppString "SnapPredicateFailure has no constructors"
-ppShelleyEpochPredFailure (UpecFailure x) = ppUPEC @era reify x
+ppShelleyEpochPredFailure (UpecFailure _) =
+  ppString "UpecPredicateFailure has no constructors"
 
 instance Reflect era => PrettyA (ShelleyEpochPredFailure era) where
   prettyA = ppShelleyEpochPredFailure
@@ -1756,25 +1742,6 @@ instance PrettyA (ShelleyPoolreapPredFailure era) where
 -- This type has no constructors, so the show instance is fine.
 instance PrettyA (ShelleySnapPredFailure era) where
   prettyA = viaShow
-
--- ===============
-
-ppUpecPredicateFailure :: ShelleyUpecPredFailure era -> PDoc
-ppUpecPredicateFailure (NewPpFailure x) = ppNewppPredicateFailure x
-
-instance PrettyA (ShelleyUpecPredFailure era) where
-  prettyA = ppUpecPredicateFailure
-
--- ===============
-ppNewppPredicateFailure :: ShelleyNewppPredFailure era -> PDoc
-ppNewppPredicateFailure (UnexpectedDepositPot c1 c2) =
-  ppRecord
-    "UnexpectedDepositPot"
-    [ ("The total outstanding deposits", pcCoin c1)
-    , ("The deposit pot", pcCoin c2)
-    ]
-
-instance PrettyA (ShelleyNewppPredFailure era) where prettyA = ppNewppPredicateFailure
 
 -- =========================================
 -- Predicate Failure for Alonzo UTXOW
@@ -1836,10 +1803,12 @@ ppShelleyUtxowPredFailure (MissingTxBodyMetadataHash m) =
   ppSexp " MissingTxMetadata" [ppAuxiliaryDataHash m]
 ppShelleyUtxowPredFailure (MissingTxMetadata m) =
   ppSexp " MissingTxMetadata" [ppAuxiliaryDataHash m]
-ppShelleyUtxowPredFailure (ConflictingMetadataHash h1 h2) =
+ppShelleyUtxowPredFailure (ConflictingMetadataHash (Mismatch supplied expected)) =
   ppRecord
     "ConflictingMetadataHash"
-    [("Hash in the body", ppAuxiliaryDataHash h1), ("Hash of full metadata", ppAuxiliaryDataHash h2)]
+    [ ("Hash in the body", ppAuxiliaryDataHash supplied)
+    , ("Hash of full metadata", ppAuxiliaryDataHash expected)
+    ]
 ppShelleyUtxowPredFailure InvalidMetadata =
   ppSexp "InvalidMetadata" []
 ppShelleyUtxowPredFailure (ExtraneousScriptWitnessesUTXOW m) =
@@ -1982,9 +1951,8 @@ ppConwayDelegPredFailure x = case x of
     ppSexp "StakeKeyNotRegisteredDELEG" [pcCredential cred]
   StakeKeyHasNonZeroRewardAccountBalanceDELEG c ->
     ppSexp "StakeKeyHasNonZeroRewardAccountBalanceDELEG" [pcCoin c]
-  DRepAlreadyRegisteredForStakeKeyDELEG cred ->
-    ppSexp "DRepAlreadyRegisteredForStakeKeyDELEG" [pcCredential cred]
-  ConwayRules.DelegateeNotRegisteredDELEG kh -> ppSexp "DelegateeNotRegisteredDELEG" [pcKeyHash kh]
+  ConwayRules.DelegateeDRepNotRegisteredDELEG cred -> ppSexp "DelegateeDRepNotRegisteredDELEG" [pcCredential cred]
+  ConwayRules.DelegateeStakePoolNotRegisteredDELEG kh -> ppSexp "DelegateeStakePoolNotRegisteredDELEG" [pcKeyHash kh]
 
 instance PrettyA (ConwayDelegPredFailure era) where
   prettyA = ppConwayDelegPredFailure
@@ -1997,9 +1965,8 @@ ppShelleyPoolPredFailure (StakePoolNotRegisteredOnKeyPOOL kh) =
     ]
 ppShelleyPoolPredFailure
   ( StakePoolRetirementWrongEpochPOOL
-      curEpoch
-      poolRetEpoch
-      firstTooFarEpoch
+      (Mismatch {mismatchExpected = curEpoch})
+      (Mismatch {mismatchSupplied = poolRetEpoch, mismatchExpected = firstTooFarEpoch})
     ) =
     ppRecord
       "StakePoolRetirementWrongEpochPOOL"
@@ -2009,8 +1976,7 @@ ppShelleyPoolPredFailure
       ]
 ppShelleyPoolPredFailure
   ( StakePoolCostTooLowPOOL
-      prcStakePoolCost
-      ppStakePoolCost
+      (Mismatch {mismatchSupplied = prcStakePoolCost, mismatchExpected = ppStakePoolCost})
     ) =
     ppRecord
       "StakePoolCostTooLowPOOL"
@@ -2019,8 +1985,7 @@ ppShelleyPoolPredFailure
       ]
 ppShelleyPoolPredFailure
   ( WrongNetworkPOOL
-      nwId
-      regCertNwId
+      (Mismatch {mismatchSupplied = nwId, mismatchExpected = regCertNwId})
       stakePoolId
     ) =
     ppRecord
@@ -2155,7 +2120,7 @@ ppShelleyUtxoPredFailure (Shelley.BadInputsUTxO x) =
   ppSexp "BadInputsUTxO" [ppSet pcTxIn x]
 ppShelleyUtxoPredFailure (Shelley.ExpiredUTxO ttl slot) =
   ppRecord "ExpiredUTxO" [("transaction time to live", pcSlotNo ttl), ("current slot", pcSlotNo slot)]
-ppShelleyUtxoPredFailure (Shelley.MaxTxSizeUTxO actual maxs) =
+ppShelleyUtxoPredFailure (Shelley.MaxTxSizeUTxO (Mismatch {mismatchSupplied = actual, mismatchExpected = maxs})) =
   ppRecord
     "MaxTxSizeUTxO"
     [ ("Actual", ppInteger actual)
@@ -2163,7 +2128,7 @@ ppShelleyUtxoPredFailure (Shelley.MaxTxSizeUTxO actual maxs) =
     ]
 ppShelleyUtxoPredFailure (Shelley.InputSetEmptyUTxO) =
   ppSexp "InputSetEmptyUTxO" []
-ppShelleyUtxoPredFailure (Shelley.FeeTooSmallUTxO computed supplied) =
+ppShelleyUtxoPredFailure (Shelley.FeeTooSmallUTxO (Mismatch {mismatchSupplied = supplied, mismatchExpected = computed})) =
   ppRecord
     "FeeTooSmallUTxO"
     [ ("min fee for this transaction", pcCoin computed)
@@ -2205,7 +2170,7 @@ instance Reflect era => PrettyA (ShelleyUtxoPredFailure era) where
 -- Predicate Failure for Shelley PPUP
 
 ppPpupPredicateFailure :: ShelleyPpupPredFailure era -> PDoc
-ppPpupPredicateFailure (NonGenesisUpdatePPUP x y) =
+ppPpupPredicateFailure (NonGenesisUpdatePPUP (Mismatch {mismatchSupplied = x, mismatchExpected = y})) =
   ppRecord
     "NonGenesisUpdatePPUP"
     [ ("KeyHashes which are voting", ppSet pcKeyHash x)
@@ -3216,12 +3181,13 @@ instance PrettyA (Anchor c) where
   prettyA = pcAnchor
 
 pcDRepState :: DRepState c -> PDoc
-pcDRepState (DRepState expire anchor deposit) =
+pcDRepState (DRepState expire anchor deposit delegs) =
   ppRecord
     "DRepState"
     [ ("expire", ppEpochNo expire)
     , ("anchor", ppStrictMaybe pcAnchor anchor)
     , ("deposit", pcCoin deposit)
+    , ("delegations", ppSet pcCredential delegs)
     ]
 
 instance PrettyA (DRepState c) where
@@ -3301,12 +3267,13 @@ showProtver :: ProtVer -> String
 showProtver (ProtVer x y) = "(" ++ show x ++ " " ++ show y ++ ")"
 
 pcEpochState :: Reflect era => Proof era -> EpochState era -> PDoc
-pcEpochState proof es@(EpochState (AccountState tre res) ls sss _) =
+pcEpochState proof es@(EpochState (AccountState tre res) ls sss nonmy) =
   ppRecord
     "EpochState"
     [ ("AccountState", ppRecord' "" [("treasury", pcCoin tre), ("reserves", pcCoin res)])
     , ("LedgerState", pcLedgerState proof ls)
     , ("SnapShots", pcSnapShots sss)
+    , ("NonMyopic", ppNonMyopic nonmy)
     , ("AdaPots", pcAdaPot es)
     ]
 
@@ -3450,6 +3417,9 @@ pcIRewards xs =
     , ("deltaR", pcDeltaCoin (DP.deltaReserves xs))
     , ("deltaT", pcDeltaCoin (DP.deltaTreasury xs))
     ]
+
+instance PrettyA (InstantaneousRewards c) where
+  prettyA = pcIRewards
 
 pcDeltaCoin :: DeltaCoin -> PDoc
 pcDeltaCoin (DeltaCoin n) = hsep [ppString "▵₳", ppInteger n]
@@ -3650,6 +3620,7 @@ instance Reflect era => PrettyA (LedgerEnv era) where
       , ("ix", prettyA (txIxToInt ledgerIx))
       , ("pparams", prettyA ledgerPp)
       , ("account", prettyA ledgerAccount)
+      , ("mempool", prettyA ledgerMempool)
       ]
 
 instance Reflect era => PrettyA (UtxoEnv era) where
@@ -3678,3 +3649,33 @@ instance Reflect era => PrettyA (CertState era) where
       , ("pState", prettyA certPState)
       , ("dState", prettyA certDState)
       ]
+
+instance PrettyA x => PrettyA (Seq x) where
+  prettyA x = prettyA (toList x)
+
+instance PrettyA (ConwayRules.CertsEnv era) where
+  prettyA (ConwayRules.CertsEnv _ _ slot epoch com prop) =
+    ppRecord
+      "CertsEnv"
+      [ ("Tx", ppString "Tx")
+      , ("pparams", ppString "PParams")
+      , ("slot", pcSlotNo slot)
+      , ("epoch", ppEpochNo epoch)
+      , ("committee", ppStrictMaybe pcCommittee com)
+      , ("proposals", ppMap pcGovPurposeId prettyA prop)
+      ]
+
+instance PrettyA RDPair where
+  prettyA (RDPair x y) = prettyA (fromCompact x, fromCompact y)
+
+pcStake :: Stake c -> PDoc
+pcStake (Stake m) = ppMap pcCredential (pcCoin . fromCompact) (VMap.toMap m)
+
+instance PrettyA (Stake c) where
+  prettyA s = pcStake s
+
+pcSnapShot :: SnapShot c -> PDoc
+pcSnapShot x = ppRecord "SnapShot" (pcSnapShotL "" x)
+
+instance PrettyA (SnapShot c) where
+  prettyA s = pcSnapShot s

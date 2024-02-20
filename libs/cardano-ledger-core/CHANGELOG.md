@@ -1,7 +1,34 @@
 # Version history for `cardano-ledger-core`
 
+## 1.15.0.0
+
+* Add `Mismatch` type to clarify predicate-failures reporting supplied and expected values. #4649
+* Added `drepDelegs` to `DRepState`
+* Add `member'` function to `UMap` module. #4639
+* Add `credKeyHash` to `Credential`
+* Remove `maxMajorPV` from `Globals`
+* Add `deleteStakingCredential` and `extractStakingCredential` to `UMap` module.
+
+### `testlib`
+
+* Add `uniformSubMap` and `uniformSubMapElems`
+* Rename `uniformSubset` to `uniformSubSet`
+* Add `tracedDiscard`
+* Add re-exported functions that were added in `cardano-ledger-binary-1.4.0.0`
+  - `ansiExpr`
+  - `ansiExprString`
+  - `diffExprString`
+  - `diffExprCompactString`
+* Existing re-exported functions `diffExpr` and `diffExprCompact` have new return types
+  per `cardano-ledger-binary-1.4.0.0`
+* Add a function `expectRawEqual`
+* Add `assertColorFailure`
+* Add `Test.Cardano.Ledger.Core.Binary.CDDL` containing core CDDL definitions
+  shared across eras.
+
 ## 1.14.0.0
 
+* Add `EncCBOR` instance for `PoolCert`
 * Add `mkTermToEvaluate` to `PlutusLanguage` class.
 * Add a field to `DebugFailure`
 * Convert `debugPlutus` to an `IO` action

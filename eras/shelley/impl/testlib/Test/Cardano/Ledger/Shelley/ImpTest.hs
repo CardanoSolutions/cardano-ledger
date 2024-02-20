@@ -15,6 +15,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
@@ -68,13 +69,18 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   getUTxO,
   impAddNativeScript,
   impAnn,
+  impAnnDoc,
   impLogToExpr,
   runImpRule,
   tryRunImpRule,
+  delegateStake,
   registerRewardAccount,
+  registerStakeCredential,
   getRewardAccountFor,
   lookupReward,
+  poolParams,
   registerPool,
+  registerPoolWithRewardAccount,
   registerAndRetirePoolToMakeReward,
   getRewardAccountAmount,
   withImpState,
@@ -100,7 +106,10 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   impSetSeed,
 
   -- * Logging
-  logEntry,
+  Doc,
+  AnsiStyle,
+  logDoc,
+  logString,
   logToExpr,
   logStakeDistr,
   logFeeMismatch,
@@ -253,11 +262,20 @@ import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Lens.Micro (Lens', SimpleGetter, lens, to, (%~), (&), (.~), (<>~), (^.))
 import Lens.Micro.Mtl (use, view, (%=), (+=), (.=))
 import Numeric.Natural (Natural)
-import Prettyprinter (Doc, Pretty (..), annotate, defaultLayoutOptions, indent, layoutPretty, line)
-import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, renderStrict)
+import Prettyprinter (
+  Doc,
+  Pretty (..),
+  annotate,
+  hcat,
+  indent,
+  line,
+  vsep,
+ )
+import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color)
 import System.Random
 import qualified System.Random as Random
 import Test.Cardano.Ledger.Binary.RoundTrip (roundTripCborRangeFailureExpectation)
+import Test.Cardano.Ledger.Binary.TreeDiff (srcLocToLocation)
 import Test.Cardano.Ledger.Core.Arbitrary ()
 import Test.Cardano.Ledger.Core.Binary.RoundTrip (roundTripEraExpectation)
 import Test.Cardano.Ledger.Core.KeyPair (
@@ -279,6 +297,7 @@ import Test.Hspec.Core.Spec (
   Result (..),
   paramsQuickCheckArgs,
  )
+import qualified Test.Hspec.Core.Spec as H
 import Test.QuickCheck.Gen (Gen (..))
 import Test.QuickCheck.Random (QCGen (..), integerVariant, mkQCGen)
 import Type.Reflection (Typeable, typeOf)
@@ -571,12 +590,11 @@ defaultInitImpTestState nes = do
       nes & nesEsL . esLStateL . lsUTxOStateL . utxosUtxoL <>~ UTxO (Map.singleton rootTxIn rootTxOut)
   prepState <- get
   let StateGen qcGen = getSubState prepState
-      majProtVer = pvMajor (nes ^. nesEsL . curPParamsEpochStateL . ppProtocolVersionL)
       epochInfoE =
         fixedEpochInfo
           (sgEpochLength shelleyGenesis)
           (mkSlotLength . fromNominalDiffTimeMicro $ sgSlotLength shelleyGenesis)
-      globals = mkShelleyGlobals shelleyGenesis epochInfoE majProtVer
+      globals = mkShelleyGlobals shelleyGenesis epochInfoE
       epochNo = nesWithRoot ^. nesELL
       slotNo = runIdentity $ runReaderT (epochInfoFirst (epochInfoPure globals) epochNo) globals
   pure $
@@ -602,6 +620,7 @@ impLedgerEnv nes = do
       , ledgerPp = nes ^. nesEsL . curPParamsEpochStateL
       , ledgerIx = TxIx 0
       , ledgerAccount = nes ^. nesEsL . esAccountStateL
+      , ledgerMempool = False
       }
 
 -- | Modify the previous PParams in the current state with the given function. For current
@@ -613,10 +632,10 @@ modifyPrevPParams ::
 modifyPrevPParams f = modifyNES $ nesEsL . prevPParamsEpochStateL %~ f
 
 -- | Logs the current stake distribution
-logStakeDistr :: ImpTestM era ()
+logStakeDistr :: HasCallStack => ImpTestM era ()
 logStakeDistr = do
   stakeDistr <- getsNES $ nesEsL . epochStateIncrStakeDistrL
-  logEntry $ "Stake distr: " <> showExpr stakeDistr
+  logDoc $ "Stake distr: " <> ansiExpr stakeDistr
 
 mkTxId :: Crypto c => Int -> TxId c
 mkTxId idx = TxId (mkDummySafeHash Proxy idx)
@@ -788,13 +807,19 @@ instance (ShelleyEraImp era, Arbitrary a, Show a, Testable prop) => Example (a -
   evaluateExample impTest params hook progressCallback =
     let runImpTestExample s = property $ \x -> do
           let args = paramsQuickCheckArgs params
-          (r, testable) <- uncurry evalImpTestM (applyParamsQCGen params s) $ do
+          (r, testable, logs) <- uncurry evalImpTestM (applyParamsQCGen params s) $ do
             t <- impTest x
             qcSize <- asks iteQuickCheckSize
             StateGen qcGen <- subStateM split
-            pure (Just (qcGen, qcSize), t)
+            logs <- gets impLog
+            pure (Just (qcGen, qcSize), t, logs)
           let params' = params {paramsQuickCheckArgs = args {replay = r, chatty = False}}
-          res <- evaluateExample (property testable) params' (\f -> hook (\_st -> f ())) progressCallback
+          res <-
+            evaluateExample
+              (counterexample (ansiDocToString logs) testable)
+              params'
+              (\f -> hook (\_st -> f ()))
+              progressCallback
           void $ throwIO $ resultStatus res
      in evaluateExample runImpTestExample params hook progressCallback
 
@@ -898,26 +923,63 @@ runImpTestM mQCSize impState action = do
     -- `futurePParams` are applied and the epoch number is updated to the first epoch
     -- number of the current era
     runReaderT (unImpTestM (passTick >> action)) env `catchAny` \exc -> do
-      logsDoc <- impLog <$> readIORef ioRef
-      let logs = T.unpack . renderStrict $ layoutPretty defaultLayoutOptions logsDoc
-          adjustHUnitExc header (HUnitFailure srcLoc failReason) =
-            toException $
-              HUnitFailure srcLoc $
-                case failReason of
-                  Reason msg -> Reason $ logs <> "\n" <> header <> msg
-                  ExpectedButGot Nothing expected got ->
-                    ExpectedButGot (Just $ logs <> header) expected got
-                  ExpectedButGot (Just msg) expected got ->
-                    ExpectedButGot (Just (logs <> "\n" <> header <> msg)) expected got
+      logs <- impLog <$> readIORef ioRef
+      let x <?> my = case my of
+            Nothing -> x
+            Just y -> x ++ [pretty y]
+          uncaughtException header excThrown =
+            H.ColorizedReason $
+              ansiDocToString $
+                vsep $
+                  header ++ [pretty $ "Uncaught Exception: " <> displayException excThrown]
+          fromHUnitFailure header (HUnitFailure mSrcLoc failReason) =
+            case failReason of
+              Reason msg ->
+                H.Failure (srcLocToLocation <$> mSrcLoc) $
+                  H.ColorizedReason $
+                    ansiDocToString $
+                      vsep $
+                        header ++ [annotate (color Red) (pretty msg)]
+              ExpectedButGot mMsg expected got ->
+                H.Failure (srcLocToLocation <$> mSrcLoc) $
+                  H.ExpectedButGot (Just (ansiDocToString $ vsep (header <?> mMsg))) expected got
+          adjustFailureReason header = \case
+            H.Failure mLoc failureReason ->
+              H.Failure mLoc $
+                case failureReason of
+                  H.NoReason ->
+                    H.ColorizedReason $ ansiDocToString $ vsep $ header ++ [annotate (color Red) "NoReason"]
+                  H.Reason msg ->
+                    H.ColorizedReason $ ansiDocToString $ vsep $ header ++ [annotate (color Red) (pretty msg)]
+                  H.ColorizedReason msg ->
+                    H.ColorizedReason $ ansiDocToString $ vsep $ header ++ [pretty msg]
+                  H.ExpectedButGot mPreface expected actual ->
+                    H.ExpectedButGot (Just (ansiDocToString $ vsep (header <?> mPreface))) expected actual
+                  H.Error mInfo excThrown -> uncaughtException (header <?> mInfo) excThrown
+            result -> result
           newExc
-            | Just hUnitExc <- fromException exc =
-                adjustHUnitExc [] hUnitExc
+            | Just hUnitExc <- fromException exc = fromHUnitFailure [logs] hUnitExc
+            | Just hspecFailure <- fromException exc = adjustFailureReason [logs] hspecFailure
             | Just (ImpException ann excThrown) <- fromException exc =
-                let header = unlines $ zipWith (\n str -> replicate n ' ' <> str) [0, 2 ..] ann
+                let annLen = length ann
+                    header =
+                      logs
+                        : [ let prefix
+                                  | annLen <= 1 = "╺╸"
+                                  | n <= 0 = "┏╸"
+                                  | n + 1 == annLen = indent (n - 1) "┗━╸"
+                                  | otherwise = indent (n - 1) "┗┳╸"
+                             in annotate (color Red) prefix <> annotate (color Yellow) a
+                          | (n, a) <- zip [0 ..] ann
+                          ]
+                        ++ [""]
                  in case fromException excThrown of
-                      Nothing -> toException $ ImpException [logs, header] excThrown
-                      Just hUnitExc -> adjustHUnitExc header hUnitExc
-            | otherwise = toException $ ImpException [logs] exc
+                      Just hUnitExc -> fromHUnitFailure header hUnitExc
+                      Nothing ->
+                        case fromException excThrown of
+                          Just hspecFailure -> adjustFailureReason header hspecFailure
+                          Nothing -> H.Failure Nothing $ uncaughtException header excThrown
+            | otherwise = H.Failure Nothing $ uncaughtException [logs] exc
       throwIO newExc
   endState <- readIORef ioRef
   pure (res, endState)
@@ -1049,8 +1111,8 @@ fixupTxOuts tx = do
     if txOut ^. coinTxOutL == zero
       then do
         let txOut' = setMinCoinTxOut pp txOut
-        logEntry $
-          "Fixed up the amount in the TxOut to " ++ show (txOut' ^. coinTxOutL)
+        logDoc $
+          "Fixed up the amount in the TxOut to " <> ansiExpr (txOut' ^. coinTxOutL)
         pure txOut'
       else do
         pure txOut
@@ -1076,9 +1138,9 @@ fixupFees txOriginal = impAnn "fixupFees" $ do
     ensureNonNegativeCoin v
       | pointwise (<=) zero v = pure v
       | otherwise = do
-          logEntry $ "Failed to validate coin: " <> show v
+          logDoc $ "Failed to validate coin: " <> ansiExpr v
           pure zero
-  logEntry "Validating changeBeforeFee"
+  logString "Validating changeBeforeFee"
   changeBeforeFee <- ensureNonNegativeCoin $ coin consumedValue <-> coin producedValue
   logToExpr changeBeforeFee
   let
@@ -1092,7 +1154,7 @@ fixupFees txOriginal = impAnn "fixupFees" $ do
     fee
       | suppliedFee == zero = calcMinFeeTxNativeScriptWits utxo pp txNoWits nativeScriptKeyWits
       | otherwise = suppliedFee
-  logEntry "Validating change"
+  logString "Validating change"
   change <- ensureNonNegativeCoin $ changeBeforeFeeTxOut ^. coinTxOutL <-> fee
   logToExpr change
   let
@@ -1132,15 +1194,15 @@ shelleyFixupTx =
     >=> updateAddrTxWits
     >=> (\tx -> logFeeMismatch tx $> tx)
 
-logFeeMismatch :: (EraGov era, EraUTxO era) => Tx era -> ImpTestM era ()
+logFeeMismatch :: (EraGov era, EraUTxO era, HasCallStack) => Tx era -> ImpTestM era ()
 logFeeMismatch tx = do
   pp <- getsNES $ nesEsL . curPParamsEpochStateL
   utxo <- getsNES $ nesEsL . esLStateL . lsUTxOStateL . utxosUtxoL
   let Coin feeUsed = tx ^. bodyTxL . feeTxBodyL
       Coin feeMin = getMinFeeTxUtxo pp tx utxo
   when (feeUsed /= feeMin) $ do
-    logEntry $
-      "Estimated fee " <> show feeUsed <> " while required fee is " <> show feeMin
+    logDoc $
+      "Estimated fee " <> ansiExpr feeUsed <> " while required fee is " <> ansiExpr feeMin
 
 submitTx_ :: (HasCallStack, ShelleyEraImp era) => Tx era -> ImpTestM era ()
 submitTx_ = void . submitTx
@@ -1289,7 +1351,7 @@ passTick = do
 -- | Runs the TICK rule until the next epoch is reached
 passEpoch ::
   forall era.
-  ShelleyEraImp era =>
+  (ShelleyEraImp era, HasCallStack) =>
   ImpTestM era ()
 passEpoch = do
   let
@@ -1299,12 +1361,12 @@ passEpoch = do
       unless (newEpochNo > curEpochNo) $ tickUntilNewEpoch curEpochNo
   preNES <- gets impNES
   let startEpoch = preNES ^. nesELL
-  logEntry $ "Entering " <> show (succ startEpoch)
+  logDoc $ "Entering " <> ansiExpr (succ startEpoch)
   tickUntilNewEpoch startEpoch
   gets impNES >>= epochBoundaryCheck preNES
 
 epochBoundaryCheck ::
-  (EraTxOut era, EraGov era) =>
+  (EraTxOut era, EraGov era, HasCallStack) =>
   NewEpochState era ->
   NewEpochState era ->
   ImpTestM era ()
@@ -1312,7 +1374,7 @@ epochBoundaryCheck preNES postNES = do
   impAnn "Checking ADA preservation at the epoch boundary" $ do
     let preSum = tot preNES
         postSum = tot postNES
-    logEntry $ diffExpr preSum postSum
+    logDoc $ diffExpr preSum postSum
     unless (preSum == postSum) . expectationFailure $
       "Total ADA in the epoch state is not preserved\n\tpost - pre = "
         <> show (postSum <-> preSum)
@@ -1344,24 +1406,32 @@ passNEpochsChecking n checks =
 
 -- | Stores extra information about the failure of the unit test
 data ImpException = ImpException
-  { ieAnnotation :: [String]
+  { ieAnnotation :: [Doc AnsiStyle]
   -- ^ Description of the IO action that caused the failure
   , ieThrownException :: SomeException
   -- ^ Exception that caused the test to fail
   }
+  deriving (Show)
 
-instance Show ImpException where
-  show (ImpException ann e) =
-    "Log:\n"
-      <> unlines ann
-      <> "\nFailed with Exception:\n\t"
-      <> displayException e
-instance Exception ImpException
+instance Exception ImpException where
+  displayException = ansiDocToString . prettyImpException
+
+prettyImpException :: ImpException -> Doc AnsiStyle
+prettyImpException (ImpException ann e) =
+  vsep $
+    mconcat
+      [ ["Annotations:"]
+      , zipWith indent [0, 2 ..] ann
+      , ["Failed with Exception:", indent 4 $ pretty (displayException e)]
+      ]
 
 -- | Annotation for when failure happens. All the logging done within annotation will be
 -- discarded if there no failures within the annotation.
 impAnn :: NFData a => String -> ImpTestM era a -> ImpTestM era a
-impAnn msg m = do
+impAnn msg = impAnnDoc (pretty msg)
+
+impAnnDoc :: NFData a => Doc AnsiStyle -> ImpTestM era a -> ImpTestM era a
+impAnnDoc msg m = do
   logs <- use impLogL
   res <- catchAnyDeep m $ \exc ->
     throwIO $
@@ -1373,18 +1443,29 @@ impAnn msg m = do
 
 -- | Adds a source location and Doc to the log, which are only shown if the test fails
 logWithCallStack :: CallStack -> Doc AnsiStyle -> ImpTestM era ()
-logWithCallStack callStack e = impLogL %= (<> loc <> line <> indent 2 e <> line)
+logWithCallStack callStack entry = impLogL %= (<> stack <> line <> indent 2 entry <> line)
   where
-    formatSrcLoc srcLoc =
-      "[" <> srcLocModule srcLoc <> ":" <> show (srcLocStartLine srcLoc) <> "]"
-    loc =
-      case getCallStack callStack of
-        (_, srcLoc) : _ -> annotate (color Blue) . pretty $ formatSrcLoc srcLoc
-        _ -> mempty
+    prettySrcLoc' SrcLoc {..} =
+      hcat
+        [ annotate (color c) d
+        | (c, d) <-
+            [ (Yellow, "[")
+            , (Blue, pretty srcLocModule)
+            , (Yellow, ":")
+            , (Magenta, pretty srcLocStartLine)
+            , (Yellow, "]")
+            ]
+        ]
+    prefix n = if n <= 0 then "" else indent (n - 1) "└"
+    stack = vsep [prefix n <> prettySrcLoc' loc | (n, (_, loc)) <- zip [0, 2 ..] (getCallStack callStack)]
 
--- | Adds a string to the log, which is only shown if the test fails
-logEntry :: HasCallStack => String -> ImpTestM era ()
-logEntry = logWithCallStack ?callStack . pretty
+-- | Adds a Doc to the log, which is only shown if the test fails
+logDoc :: HasCallStack => Doc AnsiStyle -> ImpTestM era ()
+logDoc = logWithCallStack ?callStack
+
+-- | Adds a String to the log, which is only shown if the test fails
+logString :: HasCallStack => String -> ImpTestM era ()
+logString = logWithCallStack ?callStack . pretty
 
 -- | Adds a ToExpr to the log, which is only shown if the test fails
 logToExpr :: (HasCallStack, ToExpr a) => a -> ImpTestM era ()
@@ -1571,6 +1652,33 @@ getRewardAccountFor stakingC = do
   networkId <- use (impGlobalsL . to networkId)
   pure $ RewardAccount networkId stakingC
 
+registerStakeCredential ::
+  forall era.
+  ( HasCallStack
+  , ShelleyEraImp era
+  ) =>
+  Credential 'Staking (EraCrypto era) ->
+  ImpTestM era (RewardAccount (EraCrypto era))
+registerStakeCredential cred = do
+  submitTxAnn_ ("Register Reward Account: " <> T.unpack (credToText cred)) $
+    mkBasicTx mkBasicTxBody
+      & bodyTxL . certsTxBodyL
+        .~ SSeq.fromList [RegTxCert @era cred]
+  networkId <- use (impGlobalsL . to networkId)
+  pure $ RewardAccount networkId cred
+
+delegateStake ::
+  ShelleyEraImp era =>
+  Credential 'Staking (EraCrypto era) ->
+  KeyHash 'StakePool (EraCrypto era) ->
+  ImpTestM era ()
+delegateStake cred poolKH = do
+  submitTxAnn_ ("Delegate Staking Credential: " <> T.unpack (credToText cred)) $
+    mkBasicTx mkBasicTxBody
+      & bodyTxL . certsTxBodyL
+        .~ SSeq.fromList
+          [DelegStakeTxCert cred poolKH]
+
 registerRewardAccount ::
   forall era.
   ( HasCallStack
@@ -1579,21 +1687,7 @@ registerRewardAccount ::
   ImpTestM era (RewardAccount (EraCrypto era))
 registerRewardAccount = do
   khDelegator <- freshKeyHash
-  kpDelegator <- lookupKeyPair khDelegator
-  (_, kpSpending) <- freshKeyPair
-  let stakingCredential = KeyHashObj khDelegator
-  submitTxAnn_ ("Register Reward Account: " <> T.unpack (credToText stakingCredential)) $
-    mkBasicTx mkBasicTxBody
-      & bodyTxL . outputsTxBodyL
-        .~ SSeq.fromList
-          [ mkBasicTxOut
-              (mkAddr (kpSpending, kpDelegator))
-              (inject $ Coin 10_000_000)
-          ]
-      & bodyTxL . certsTxBodyL
-        .~ SSeq.fromList [RegTxCert @era stakingCredential]
-  networkId <- use (impGlobalsL . to networkId)
-  pure $ RewardAccount networkId stakingCredential
+  registerStakeCredential (KeyHashObj khDelegator)
 
 lookupReward :: HasCallStack => Credential 'Staking (EraCrypto era) -> ImpTestM era Coin
 lookupReward stakingCredential = do
@@ -1607,46 +1701,54 @@ lookupReward stakingCredential = do
           <> "or by some other means."
     Just rd -> pure $ fromCompact (rdReward rd)
 
-registerPool ::
+poolParams ::
   ShelleyEraImp era =>
-  ImpTestM era (KeyHash 'StakePool (EraCrypto era))
-registerPool = registerRewardAccount >>= registerPoolWithRewardAccount
-
-registerPoolWithRewardAccount ::
-  ShelleyEraImp era =>
+  KeyHash 'StakePool (EraCrypto era) ->
   RewardAccount (EraCrypto era) ->
-  ImpTestM era (KeyHash 'StakePool (EraCrypto era))
-registerPoolWithRewardAccount rewardAccount = do
-  khPool <- freshKeyHash
+  ImpTestM era (PoolParams (EraCrypto era))
+poolParams khPool rewardAccount = do
   vrfHash <- freshKeyHashVRF
   pp <- getsNES $ nesEsL . curPParamsEpochStateL
   let minCost = pp ^. ppMinPoolCostL
   poolCostExtra <- uniformRM (Coin 0, Coin 100_000_000)
   pledge <- uniformRM (Coin 0, Coin 100_000_000)
-  let
-    poolParams =
-      PoolParams
-        { ppVrf = vrfHash
-        , ppRewardAccount = rewardAccount
-        , ppRelays = mempty
-        , ppPledge = pledge
-        , ppOwners = mempty
-        , ppMetadata = SNothing
-        , ppMargin = def
-        , ppId = khPool
-        , ppCost = minCost <> poolCostExtra
-        }
+  pure
+    PoolParams
+      { ppVrf = vrfHash
+      , ppRewardAccount = rewardAccount
+      , ppRelays = mempty
+      , ppPledge = pledge
+      , ppOwners = mempty
+      , ppMetadata = SNothing
+      , ppMargin = def
+      , ppId = khPool
+      , ppCost = minCost <> poolCostExtra
+      }
+
+registerPool ::
+  ShelleyEraImp era =>
+  KeyHash 'StakePool (EraCrypto era) ->
+  ImpTestM era ()
+registerPool khPool = registerRewardAccount >>= registerPoolWithRewardAccount khPool
+
+registerPoolWithRewardAccount ::
+  ShelleyEraImp era =>
+  KeyHash 'StakePool (EraCrypto era) ->
+  RewardAccount (EraCrypto era) ->
+  ImpTestM era ()
+registerPoolWithRewardAccount khPool rewardAccount = do
+  pps <- poolParams khPool rewardAccount
   submitTxAnn_ "Registering a new stake pool" $
     mkBasicTx mkBasicTxBody
-      & bodyTxL . certsTxBodyL .~ SSeq.singleton (RegPoolTxCert poolParams)
-  pure khPool
+      & bodyTxL . certsTxBodyL .~ SSeq.singleton (RegPoolTxCert pps)
 
 registerAndRetirePoolToMakeReward ::
   ShelleyEraImp era =>
   Credential 'Staking (EraCrypto era) ->
   ImpTestM era ()
 registerAndRetirePoolToMakeReward stakingCred = do
-  poolId <- registerPoolWithRewardAccount =<< getRewardAccountFor stakingCred
+  poolId <- freshKeyHash
+  registerPoolWithRewardAccount poolId =<< getRewardAccountFor stakingCred
   passEpoch
   curEpochNo <- getsNES nesELL
   let poolLifetime = 2

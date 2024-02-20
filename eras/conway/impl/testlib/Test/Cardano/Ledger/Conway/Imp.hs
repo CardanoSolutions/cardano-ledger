@@ -16,22 +16,37 @@ import Cardano.Ledger.Alonzo.Rules (
  )
 import Cardano.Ledger.Babbage.Rules (BabbageUtxoPredFailure, BabbageUtxowPredFailure)
 import Cardano.Ledger.Babbage.TxInfo (BabbageContextError)
-import Cardano.Ledger.BaseTypes (Inject, natVersion)
+import Cardano.Ledger.BaseTypes (Inject, ShelleyBase, natVersion)
 import Cardano.Ledger.Conway.Core
 import Cardano.Ledger.Conway.Rules (
   ConwayBbodyPredFailure,
+  ConwayCertsPredFailure,
+  ConwayDelegPredFailure,
   ConwayEpochEvent,
   ConwayGovCertPredFailure,
   ConwayGovPredFailure,
+  ConwayHardForkEvent,
+  ConwayLedgerEvent,
   ConwayLedgerPredFailure,
+  ConwayMempoolEvent,
   ConwayNewEpochEvent,
  )
 import Cardano.Ledger.Conway.TxInfo (ConwayContextError)
-import Cardano.Ledger.Shelley.Rules (Event, ShelleyUtxoPredFailure, ShelleyUtxowPredFailure)
+import Cardano.Ledger.Shelley.API.Mempool (ApplyTx (..))
+import Cardano.Ledger.Shelley.Rules (
+  ShelleyLedgersEnv,
+  ShelleyLedgersEvent,
+  ShelleyUtxoPredFailure,
+  ShelleyUtxowPredFailure,
+ )
+import Control.State.Transition.Extended
+import Data.Sequence (Seq)
 import Data.Typeable (Typeable)
 import qualified Test.Cardano.Ledger.Babbage.Imp as BabbageImp
 import Test.Cardano.Ledger.Common
 import qualified Test.Cardano.Ledger.Conway.Imp.BbodySpec as Bbody
+import qualified Test.Cardano.Ledger.Conway.Imp.CertsSpec as Certs
+import qualified Test.Cardano.Ledger.Conway.Imp.DelegSpec as Deleg
 import qualified Test.Cardano.Ledger.Conway.Imp.EnactSpec as Enact
 import qualified Test.Cardano.Ledger.Conway.Imp.EpochSpec as Epoch
 import qualified Test.Cardano.Ledger.Conway.Imp.GovCertSpec as GovCert
@@ -48,6 +63,7 @@ spec ::
   , ConwayEraImp era
   , EraSegWits era
   , InjectRuleFailure "LEDGER" ConwayGovPredFailure era
+  , InjectRuleFailure "LEDGER" ConwayCertsPredFailure era
   , Inject (BabbageContextError era) (ContextError era)
   , Inject (ConwayContextError era) (ContextError era)
   , InjectRuleFailure "LEDGER" BabbageUtxoPredFailure era
@@ -57,6 +73,7 @@ spec ::
   , InjectRuleFailure "LEDGER" AlonzoUtxowPredFailure era
   , InjectRuleFailure "LEDGER" ShelleyUtxoPredFailure era
   , InjectRuleFailure "LEDGER" ShelleyUtxowPredFailure era
+  , InjectRuleFailure "LEDGER" ConwayDelegPredFailure era
   , InjectRuleFailure "LEDGER" ConwayGovCertPredFailure era
   , InjectRuleFailure "LEDGER" ConwayLedgerPredFailure era
   , InjectRuleFailure "BBODY" ConwayBbodyPredFailure era
@@ -67,6 +84,15 @@ spec ::
   , InjectRuleEvent "TICK" ConwayEpochEvent era
   , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
   , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , Event (EraRule "MEMPOOL" era) ~ ConwayMempoolEvent era
+  , Event (EraRule "LEDGERS" era) ~ ShelleyLedgersEvent era
+  , Event (EraRule "LEDGER" era) ~ ConwayLedgerEvent era
+  , BaseM (EraRule "LEDGERS" era) ~ ShelleyBase
+  , Environment (EraRule "LEDGERS" era) ~ ShelleyLedgersEnv era
+  , Signal (EraRule "LEDGERS" era) ~ Seq (Tx era)
+  , STS (EraRule "LEDGERS" era)
+  , ApplyTx era
+  , Event (EraRule "HARDFORK" era) ~ ConwayHardForkEvent era
   ) =>
   Spec
 spec = do
@@ -74,6 +100,7 @@ spec = do
   describe "ConwayImpSpec - post bootstrap (protocol version 10)" $
     withImpStateWithProtVer @era (natVersion @10) $ do
       describe "BBODY" $ Bbody.spec @era
+      describe "DELEG" $ Deleg.spec @era
       describe "ENACT" $ Enact.spec @era
       describe "EPOCH" $ Epoch.spec @era
       describe "GOV" $ Gov.spec @era
@@ -85,6 +112,8 @@ spec = do
   describe "ConwayImpSpec - bootstrap phase (protocol version 9)" $
     withImpState @era $ do
       describe "BBODY" $ Bbody.spec @era
+      describe "CERTS" $ Certs.spec @era
+      describe "DELEG" $ Deleg.spec @era
       describe "ENACT" $ Enact.relevantDuringBootstrapSpec @era
       describe "EPOCH" $ Epoch.relevantDuringBootstrapSpec @era
       describe "GOV" $ Gov.relevantDuringBootstrapSpec @era

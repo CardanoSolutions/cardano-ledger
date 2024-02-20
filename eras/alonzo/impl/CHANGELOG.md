@@ -1,6 +1,23 @@
 # Version history for `cardano-ledger-alonzo`
 
-## 1.10.1.0
+## 1.11.0.0
+
+* Add `ProtVer` argument to functions in `EraPlutusTxInfo` class:
+  * `toPlutusTxCert` of
+  * `toPlutusScriptPurpose`
+  * `toPlutusArgs`
+* Add `ProtVer` argument to `TxInfo` functions:
+  * `transTxBodyCerts`
+  * `transPlutusPurpose`
+  * `toPlutusV1Args`
+  * `toLegacyPlutusArgs`
+
+### `testlib`
+
+* Move `TxInfo` golden tests over from the older `-test` package. #4599
+  * Also move the `gen-golden` executable over.
+
+## 1.10.2.0
 
 * Added `wireSizeAlonzoTxF`
 

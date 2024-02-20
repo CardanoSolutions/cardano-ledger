@@ -1,9 +1,42 @@
 # Version history for `cardano-ledger-shelley`
 
+## 1.14.0.0
+
+* Remove `ShelleyNewppPredFailure`. #4649
+* Change predicate-failures and their serialization to use the `Mismatch` type to report supplied and expected values. #4649
+  * `MaxTxSizeUTxO`
+  * `FeeTooSmallUTxO`
+  * `WrongBlockBodySizeBBODY`
+  * `InvalidBodyHashBBODY`
+  * `ConflictingMetadataHash`
+  * `StakePoolRetirementWrongEpochPOOL`
+  * `StakePoolCostTooLowPOOL`
+  * `WrongNetworkPOOL`
+  * `NonGenesisUpdatePPUP`
+* Deprecated `applyTxs` and `applyTxsTransition` in `Mempool`
+* Replaced `applyTx` in `ApplyTx` class with `applyTxOpts`
+* Added and exposed `applyTx` in `Mempool`
+* Added `mempool` to `LedgerEnv`
+* Added `registerStakeCredential` and `delegateStake` to `ImpTest`
+* Remove protocol version argument from `mkShelleyGlobals` (`maxMajorPV` was removed from `Globals`)
+* Added `EncCBOR` instances for:
+  * `UtxoEnv`
+  * `CertEnv`
+* Expose `ptrMapL`
+
+### `testlib`
+
+* Exposed `registerPoolWithRewardAccount`
+* Added `poolParams` to `ImpTest`
+* Changed signature of `registerPool`
+* Remove `minMajorPV` and `maxMajorPV` from `Constants`
+* Add `logDoc` that takes a `Doc AnsiStyle` instead of a `String`
+* Rename `logEntry` to `logString`
+* Added CDDL definitions in Test.Cardano.Ledger.Shelley.CDDL
+
 ## 1.13.0.0
 
 * Add `translateToShelleyLedgerStateFromUtxo`
-
 * Added `wireSizeShelleyTxF`
 
 ### `testlib`

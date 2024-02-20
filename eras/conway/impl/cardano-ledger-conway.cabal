@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               cardano-ledger-conway
-version:            1.16.1.0
+version:            1.17.2.0
 license:            Apache-2.0
 maintainer:         operations@iohk.io
 author:             IOHK
@@ -14,6 +14,7 @@ build-type:         Simple
 data-files:
     test/data/*.json
     cddl-files/conway.cddl
+    golden/*.cbor
 
 extra-source-files: CHANGELOG.md
 
@@ -34,6 +35,7 @@ library
         Cardano.Ledger.Conway.PParams
         Cardano.Ledger.Conway.Tx
         Cardano.Ledger.Conway.TxBody
+        Cardano.Ledger.Conway.TxBody.Internal
         Cardano.Ledger.Conway.TxInfo
         Cardano.Ledger.Conway.TxWits
         Cardano.Ledger.Conway.Transition
@@ -59,8 +61,10 @@ library
         Cardano.Ledger.Conway.Rules.Certs
         Cardano.Ledger.Conway.Rules.Enact
         Cardano.Ledger.Conway.Rules.Epoch
+        Cardano.Ledger.Conway.Rules.HardFork
         Cardano.Ledger.Conway.Rules.Ledger
         Cardano.Ledger.Conway.Rules.Ledgers
+        Cardano.Ledger.Conway.Rules.Mempool
         Cardano.Ledger.Conway.Rules.NewEpoch
         Cardano.Ledger.Conway.Rules.Gov
         Cardano.Ledger.Conway.Rules.Pool
@@ -84,20 +88,20 @@ library
         data-default-class,
         cardano-crypto-class,
         cardano-data >=1.2.3,
-        cardano-ledger-binary >=1.3.2,
+        cardano-ledger-binary ^>=1.4,
         cardano-ledger-allegra ^>=1.6,
-        cardano-ledger-alonzo ^>=1.10,
-        cardano-ledger-babbage ^>=1.9,
-        cardano-ledger-core ^>=1.14,
+        cardano-ledger-alonzo ^>=1.11,
+        cardano-ledger-babbage ^>=1.10,
+        cardano-ledger-core ^>=1.15,
         cardano-ledger-mary ^>=1.7,
-        cardano-ledger-shelley ^>=1.13,
+        cardano-ledger-shelley ^>=1.14,
         cardano-slotting,
         cardano-strict-containers,
         containers,
         deepseq,
         microlens,
         nothunks,
-        plutus-ledger-api ^>=1.32,
+        plutus-ledger-api >=1.33,
         set-algebra,
         small-steps >=1.1,
         text,
@@ -117,6 +121,8 @@ library testlib
         Test.Cardano.Ledger.Conway.ImpTest
         Test.Cardano.Ledger.Conway.Imp
         Test.Cardano.Ledger.Conway.Imp.BbodySpec
+        Test.Cardano.Ledger.Conway.Imp.CertsSpec
+        Test.Cardano.Ledger.Conway.Imp.DelegSpec
         Test.Cardano.Ledger.Conway.Imp.EpochSpec
         Test.Cardano.Ledger.Conway.Imp.EnactSpec
         Test.Cardano.Ledger.Conway.Imp.GovSpec
@@ -128,6 +134,7 @@ library testlib
         Test.Cardano.Ledger.Conway.Proposals
         Test.Cardano.Ledger.Conway.TreeDiff
         Test.Cardano.Ledger.Conway.Genesis
+        Test.Cardano.Ledger.Conway.Translation.TranslatableGen
 
     visibility:       public
     hs-source-dirs:   testlib
@@ -141,29 +148,31 @@ library testlib
     build-depends:
         base,
         bytestring,
-        cardano-data:{cardano-data, testlib},
-        containers,
-        cuddle >=0.3.0.0,
-        plutus-ledger-api,
-        deepseq,
-        microlens,
         cardano-crypto-class,
+        cardano-data:{cardano-data, testlib},
         cardano-ledger-allegra,
         cardano-ledger-alonzo:{cardano-ledger-alonzo, testlib},
-        cardano-ledger-binary,
-        cardano-ledger-babbage:{cardano-ledger-babbage, testlib} >=1.8.2,
+        cardano-ledger-binary:{cardano-ledger-binary, testlib},
+        cardano-ledger-babbage:{cardano-ledger-babbage, testlib},
         cardano-ledger-conway,
         cardano-ledger-core:{cardano-ledger-core, testlib},
         cardano-ledger-mary,
-        cardano-ledger-shelley,
+        cardano-ledger-shelley:{cardano-ledger-shelley, testlib},
         cardano-strict-containers,
+        containers,
+        cuddle >=0.3.2,
         data-default-class,
+        deepseq,
         FailT,
         generic-random,
+        here,
+        microlens,
         microlens-mtl,
         mtl,
-        text,
-        small-steps >=1.1
+        plutus-ledger-api,
+        prettyprinter,
+        small-steps >=1.1,
+        text
 
 executable huddle-cddl
     main-is:          Main.hs
@@ -178,7 +187,23 @@ executable huddle-cddl
     build-depends:
         base,
         testlib,
-        cardano-ledger-binary:testlib >=1.3.4.0
+        cardano-ledger-binary:testlib >=1.4
+
+executable gen-golden
+    main-is:          GenerateGoldenFileMain.hs
+    hs-source-dirs:   test
+    other-modules:    Paths_cardano_ledger_conway
+    default-language: Haskell2010
+    ghc-options:
+        -Wall -Wcompat -Wincomplete-record-updates
+        -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+        -Wunused-packages
+
+    build-depends:
+        base,
+        cardano-ledger-conway,
+        testlib,
+        cardano-ledger-alonzo:testlib
 
 test-suite tests
     type:             exitcode-stdio-1.0
@@ -193,6 +218,8 @@ test-suite tests
         Test.Cardano.Ledger.Conway.GenesisSpec
         Test.Cardano.Ledger.Conway.GovActionReorderSpec
         Test.Cardano.Ledger.Conway.Plutus.PlutusSpec
+        Test.Cardano.Ledger.Conway.TxInfoSpec
+        Test.Cardano.Ledger.Conway.GoldenTranslation
         Paths_cardano_ledger_conway
 
     default-language: Haskell2010
@@ -209,12 +236,16 @@ test-suite tests
         cardano-ledger-alonzo:testlib,
         cardano-ledger-alonzo,
         cardano-ledger-babbage,
+        cardano-ledger-binary,
         cardano-ledger-conway,
         cardano-ledger-core,
         cardano-ledger-binary:testlib,
+        cardano-ledger-shelley >=1.14,
         cardano-slotting:testlib,
         cardano-strict-containers,
         containers,
         data-default-class,
         microlens,
-        testlib
+        plutus-ledger-api,
+        testlib,
+        HUnit

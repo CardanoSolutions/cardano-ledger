@@ -1,6 +1,66 @@
 # Version history for `cardano-ledger-conway`
 
+## 1.17.2.0
+
+* Change the state used for `ConwayWdrlNotDelegatedToDRep` predicate failure checking
+
+## 1.17.1.0
+
+* Add `processDelegation`
+
 ## 1.17.0.0
+
+* Added `reDelegatees` and `rePoolParams` to `RatifyEnv` for updated SPO vote calculation #4645
+* Added `dpPoolParams` to `DRepPulser` to track the parameters of each stake pool
+* Add `HardForkEvent` constructor to `ConwayEpochEvent`
+* Add `HardFork` module, `ConwayHARDFORK` and `ConwayHardForkEvent`
+* Add predicate failures to guard against invalid reward accounts (return addresses) in proposals and treasury withdrawals. #4639
+  * `ProposalReturnAddressDoesNotExist`, and
+  * `TreasuryWithdrawalReturnAddressDoesNotExist`.
+* Add `refScriptCostStride` and `refScriptCostMultiplier`
+* Added protocol version argument to `ppuWellFormed`
+* Add `ConwayMempoolEvent` type
+* Add `MempoolEvent` to `ConwayLedgerEvent`
+* Add `Mempool` module, `ConwayMEMPOOL` and `ConwayMempoolPredFailure`
+* Add `ConwayMempoolFailure` to `ConwayLedgerPredFailure`
+* Add `ZeroTreasuryWithdrawals` to `ConwayGovPredFailure`
+* Add `ProtVer` argument to `TxInfo` functions:
+  * `transTxCert`
+  * `transScriptPurpose`
+  * `transPlutusPurposeV1V2`
+  * `toPlutusV3Args`
+* Changed `ConwayWdrlNotDelegatedToDRep` to wrap `NonEmpty KeyHash`
+* Removed `DRepAlreadyRegisteredForStakeKeyDELEG`
+* Add `showGovActionType`, `acceptedByEveryone`
+* Added `unRatifySignal`
+* Added lenses:
+  * `ratifySignalL`
+  * `reStakeDistrL`
+  * `reStakePoolDistrL`
+  * `reDRepDistrL`
+  * `reDRepStateL`
+  * `reCurrentEpochL`
+  * `reCommitteeStateL`
+* Add a new field to `GovInfoEvent` and change "unclaimed" field from `Set` to a `Map`.
+* Changed return type of `proposalsShowDebug`
+* Added `gen-golden` executable needed for golden tests: #4629
+* Change `State` for `CERT` and `GOVCERT` to `CertState`
+* Add `DelegateeDRepNotRegisteredDELEG` predicate failure
+* Rename `DelegateeNotRegisteredDELEG` to `DelegateeStakePoolNotRegisteredDELEG`
+
+### `testlib`
+
+* Added `expectMembers`
+* Removed `redelegateDRep` from `ImpTest`
+* Changed signature of `delegateToDRep` to take a `Credential` parameter
+* Move `TxInfo` golden tests over from the older `-test` package. #4599
+  * Also move the `gen-golden` executable over.
+* Added Test.Cardano.Ledger.Conway.CDDL with CDDL definitions in Conway.
+* Change `ImpException` to contain `Doc`
+* Add `impAnnDoc`
+* Add `ifBootstrap`
+
+## 1.16.1.0
 
 * Replace GOVCERT `updateDRepExpiry` with `computeDRepExpiry`
 * Added `Eq`, `Show`, `NFData` and `Generic` instances for `CertsEnv`

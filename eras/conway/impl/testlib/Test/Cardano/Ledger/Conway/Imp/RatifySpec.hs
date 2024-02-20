@@ -4,7 +4,6 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 module Test.Cardano.Ledger.Conway.Imp.RatifySpec (
   spec,
@@ -50,6 +49,7 @@ spec = do
   committeeMinSizeAffectsInFlightProposalsSpec
   paramChangeAffectsProposalsSpec
   committeeExpiryResignationDiscountSpec
+  committeeMaxTermLengthSpec
 
 relevantDuringBootstrapSpec ::
   forall era.
@@ -58,6 +58,7 @@ relevantDuringBootstrapSpec ::
 relevantDuringBootstrapSpec = do
   spoVotesForHardForkInitiation
   initiateHardForkWithLessThanMinimalCommitteeSize
+  spoAndCCVotingSpec
   it "Many CC Cold Credentials map to the same Hot Credential act as many votes" $ do
     hotCred NE.:| _ <- registerInitialCommittee
     (dRep, _, _) <- setupSingleDRep =<< uniformRM (10_000_000, 1_000_000_000)
@@ -104,6 +105,110 @@ initiateHardForkWithLessThanMinimalCommitteeSize =
         passNEpochs 2
         getLastEnactedHardForkInitiation `shouldReturn` SNothing
 
+spoAndCCVotingSpec ::
+  forall era.
+  ConwayEraImp era =>
+  SpecWith (ImpTestState era)
+spoAndCCVotingSpec = do
+  describe "When CC expired" $ do
+    let expireCommitteeMembers = do
+          hotCs <- registerInitialCommittee
+          -- TODO: change the maxtermlength to make the test faster
+          EpochInterval committeeMaxTermLength <-
+            getsNES $
+              nesEsL . curPParamsEpochStateL . ppCommitteeMaxTermLengthL
+          passNEpochs $ fromIntegral committeeMaxTermLength
+          ms <- getCommitteeMembers
+          -- Make sure that committee expired
+          forM_ ms ccShouldBeExpired
+          pure hotCs
+    it "SPOs alone can't enact hard-fork" $ do
+      hotCs <- expireCommitteeMembers
+      (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000_000
+      protVer <- getProtVer
+
+      gai <- submitGovAction $ HardForkInitiation SNothing (majorFollow protVer)
+
+      submitYesVote_ (StakePoolVoter spoC) gai
+      -- CC members expired so their votes don't count - we are stuck!
+      submitYesVoteCCs_ hotCs gai
+
+      passNEpochs 2
+
+      getLastEnactedHardForkInitiation `shouldReturn` SNothing
+      getProtVer `shouldReturn` protVer
+    it "SPOs alone can't enact security group parameter change" $ do
+      void expireCommitteeMembers
+      (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000_000
+      initialRefScriptBaseFee <- getsPParams ppMinFeeRefScriptCostPerByteL
+
+      gid <-
+        submitParameterChange SNothing $
+          emptyPParamsUpdate
+            & ppuMinFeeRefScriptCostPerByteL .~ SJust (25 %! 2)
+
+      submitYesVote_ (StakePoolVoter spoC) gid
+
+      passNEpochs 2
+
+      getLastEnactedParameterChange `shouldReturn` SNothing
+      getsPParams ppMinFeeRefScriptCostPerByteL `shouldReturn` initialRefScriptBaseFee
+  describe "When CC threshold is 0" $ do
+    -- During the bootstrap phase, proposals that modify the committee are not allowed,
+    -- hence we need to directly set the threshold for the initial members
+    let
+      modifyCommittee f = modifyNES $ \nes ->
+        nes
+          & newEpochStateGovStateL . committeeGovStateL %~ f
+          & newEpochStateDRepPulsingStateL %~ modifyDRepPulser
+        where
+          modifyDRepPulser pulser =
+            case finishDRepPulser pulser of
+              (snapshot, rState) -> DRComplete snapshot (rState & rsEnactStateL . ensCommitteeL %~ f)
+    it "SPOs alone can enact hard-fork during bootstrap" $ do
+      (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000_000
+      protVer <- getProtVer
+      nextMajorVersion <- succVersion $ pvMajor protVer
+      let nextProtVer = protVer {pvMajor = nextMajorVersion}
+      modifyCommittee $ fmap (committeeThresholdL .~ 0 %! 1)
+
+      gai <- submitGovAction $ HardForkInitiation SNothing (majorFollow protVer)
+
+      submitYesVote_ (StakePoolVoter spoC) gai
+
+      passNEpochs 2
+
+      if bootstrapPhase protVer
+        then do
+          getLastEnactedHardForkInitiation `shouldReturn` SJust (GovPurposeId gai)
+          getProtVer `shouldReturn` nextProtVer
+        else do
+          getLastEnactedHardForkInitiation `shouldReturn` SNothing
+          getProtVer `shouldReturn` protVer
+    it "SPOs alone can enact security group parameter change during bootstrap" $ do
+      (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000_000
+      protVer <- getProtVer
+      initialRefScriptBaseFee <- getsPParams ppMinFeeRefScriptCostPerByteL
+      modifyCommittee $ fmap (committeeThresholdL .~ 0 %! 1)
+
+      gai <-
+        submitParameterChange SNothing $
+          emptyPParamsUpdate
+            & ppuMinFeeRefScriptCostPerByteL .~ SJust (25 %! 2)
+
+      submitYesVote_ (StakePoolVoter spoC) gai
+
+      passNEpochs 2
+
+      newRefScriptBaseFee <- getsPParams ppMinFeeRefScriptCostPerByteL
+      if bootstrapPhase protVer
+        then do
+          getLastEnactedParameterChange `shouldReturn` SJust (GovPurposeId gai)
+          newRefScriptBaseFee `shouldBe` (25 %! 2)
+        else do
+          getLastEnactedParameterChange `shouldReturn` SNothing
+          newRefScriptBaseFee `shouldBe` initialRefScriptBaseFee
+
 committeeExpiryResignationDiscountSpec ::
   forall era.
   ConwayEraImp era =>
@@ -113,6 +218,7 @@ committeeExpiryResignationDiscountSpec =
     it "Expired" $ do
       modifyPParams $ ppCommitteeMinSizeL .~ 2
       (drep, _, _) <- setupSingleDRep 1_000_000
+      (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
       -- Elect a committee of 2 members
       committeeColdC1 <- KeyHashObj <$> freshKeyHash
       committeeColdC2 <- KeyHashObj <$> freshKeyHash
@@ -125,6 +231,7 @@ committeeExpiryResignationDiscountSpec =
           ]
           (1 %! 2)
       submitYesVote_ (DRepVoter drep) gaiCC
+      submitYesVote_ (StakePoolVoter spoC) gaiCC
       passNEpochs 2
       getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gaiCC)
       committeeHotC1 <- registerCommitteeHotKey committeeColdC1
@@ -143,6 +250,7 @@ committeeExpiryResignationDiscountSpec =
     it "Resigned" $ do
       modifyPParams $ ppCommitteeMinSizeL .~ 2
       (drep, _, _) <- setupSingleDRep 1_000_000
+      (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
       -- Elect a committee of 2 members
       committeeColdC1 <- KeyHashObj <$> freshKeyHash
       committeeColdC2 <- KeyHashObj <$> freshKeyHash
@@ -155,6 +263,7 @@ committeeExpiryResignationDiscountSpec =
           ]
           (1 %! 2)
       submitYesVote_ (DRepVoter drep) gaiCC
+      submitYesVote_ (StakePoolVoter spoC) gaiCC
       passNEpochs 2
       getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gaiCC)
       committeeHotC1 <- registerCommitteeHotKey committeeColdC1
@@ -228,15 +337,21 @@ paramChangeAffectsProposalsSpec =
         enactThreshold largerThreshold drepC hotCommitteeC
         isDRepAccepted gaiChild `shouldReturn` False
       it "Decreasing the threshold ratifies a hitherto-unratifiable proposal" $ do
+        -- This sets up a stake pool with 1_000_000 Coin
         (drepC, hotCommitteeC, _) <- electBasicCommittee
         setThreshold largerThreshold
         (drep, _, _) <- setupSingleDRep 1_000_000
-        (gaiParent, gaiChild) <- submitTwoExampleProposalsAndVoteOnTheChild [] [(drep, VoteYes)]
+        (spoC, _, _) <- setupPoolWithStake $ Coin 3_000_000
+        (gaiParent, gaiChild) <-
+          submitTwoExampleProposalsAndVoteOnTheChild [(spoC, VoteYes)] [(drep, VoteYes)]
         isDRepAccepted gaiChild `shouldReturn` False
         enactThreshold smallerThreshold drepC hotCommitteeC
         isDRepAccepted gaiChild `shouldReturn` True
         -- Not vote on the parent too to make sure both get enacted
         submitYesVote_ (DRepVoter drep) gaiParent
+        -- bootstrap: 3 % 4 stake yes; 1 % 4 stake abstain; yes / stake - abstain > 1 % 2
+        -- post-bootstrap: 3 % 4 stake yes; 1 % 4 stake no
+        submitYesVote_ (StakePoolVoter spoC) gaiParent
         passNEpochs 2
         getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gaiParent)
         passEpoch -- UpdateCommittee is a delaying action
@@ -260,11 +375,14 @@ paramChangeAffectsProposalsSpec =
             submitYesVote_ (CommitteeVoter hotCommitteeC) pcGai
             passNEpochs 2
       it "Increasing the threshold prevents a hitherto-ratifiable proposal from being ratified" $ do
+        -- This sets up a stake pool with 1_000_000 Coin
         (drepC, hotCommitteeC, _) <- electBasicCommittee
         setThreshold smallerThreshold
-        (poolKH1, _paymentC1, _stakingC1) <- setupPoolWithStake $ Coin 1_000_000
+        (poolKH1, _paymentC1, _stakingC1) <- setupPoolWithStake $ Coin 2_000_000
         (poolKH2, _paymentC2, _stakingC2) <- setupPoolWithStake $ Coin 1_000_000
         passEpoch -- Make the new pool distribution count
+        -- bootstrap: 1 % 2 stake yes (2_000_000); 1 % 2 stake abstain; yes / stake - abstain == 1 % 2
+        -- post-bootstrap: 1 % 2 stake yes (2_000_000); 1 % 4 stake didn't vote; 1 % 4 stake no
         (_gaiParent, gaiChild) <-
           submitTwoExampleProposalsAndVoteOnTheChild
             [(poolKH1, VoteYes), (poolKH2, VoteNo)]
@@ -273,10 +391,13 @@ paramChangeAffectsProposalsSpec =
         enactThreshold largerThreshold drepC hotCommitteeC
         isSpoAccepted gaiChild `shouldReturn` False
       it "Decreasing the threshold ratifies a hitherto-unratifiable proposal" $ do
+        -- This sets up a stake pool with 1_000_000 Coin
         (drepC, hotCommitteeC, _) <- electBasicCommittee
         setThreshold largerThreshold
-        (poolKH1, _paymentC1, _stakingC1) <- setupPoolWithStake $ Coin 1_000_000
+        (poolKH1, _paymentC1, _stakingC1) <- setupPoolWithStake $ Coin 2_000_000
         (poolKH2, _paymentC2, _stakingC2) <- setupPoolWithStake $ Coin 1_000_000
+        -- bootstrap: 1 % 2 stake yes (2_000_000); 1 % 2 stake abstain; yes / stake - abstain == 1 % 2
+        -- post-bootstrap: 1 % 2 stake yes (2_000_000); 1 % 4 stake didn't vote; 1 % 4 stake no
         (gaiParent, gaiChild) <-
           submitTwoExampleProposalsAndVoteOnTheChild
             [(poolKH1, VoteYes), (poolKH2, VoteNo)]
@@ -368,6 +489,7 @@ committeeMinSizeAffectsInFlightProposalsSpec =
       getsNES (nesEsL . esAccountStateL . asTreasuryL) `shouldReturn` treasury
     it "TreasuryWithdrawal ratifies due to a decrease in CommitteeMinSize" $ do
       (drepC, hotCommitteeC, _) <- electBasicCommittee
+      (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
       amount <- uniformRM (Coin 1, Coin 100_000_000)
       -- Ensure sufficient amount in the treasury
       submitTx_ $ mkBasicTx (mkBasicTxBody & treasuryDonationTxBodyL .~ amount)
@@ -386,6 +508,7 @@ committeeMinSizeAffectsInFlightProposalsSpec =
       coldCommitteeCred <- KeyHashObj <$> freshKeyHash
       gaiCC <- submitUpdateCommittee Nothing mempty [(coldCommitteeCred, EpochInterval 10)] (1 %! 2)
       submitYesVote_ (DRepVoter drepC) gaiCC
+      submitYesVote_ (StakePoolVoter spoC) gaiCC
       passNEpochs 2
       _hotCommitteeC' <- registerCommitteeHotKey coldCommitteeCred
       isCommitteeAccepted gaiTW `shouldReturn` True
@@ -407,10 +530,14 @@ spoVotesCommitteeUpdates =
         modifyPParams $ ppPoolVotingThresholdsL . pvtMotionNoConfidenceL .~ 1 %! 2
         whenPostBootstrap (modifyPParams $ ppDRepVotingThresholdsL .~ def)
         gai <- submitGovAction $ NoConfidence SNothing
-        -- 1 % 4 stake yes; 3 % 4 stake abstain; yes / stake - abstain > 1 % 2
+        -- bootstrap: 1 % 4 stake yes; 3 % 4 stake abstain; yes / stake - abstain > 1 % 2
+        -- post-bootstrap: 1 % 4 stake yes; 3 % 4 stake no; yes stake < 1 % 2
         submitYesVote_ (StakePoolVoter spoK1) gai
         passNEpochs 2
-        getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gai)
+        pv <- getProtVer
+        if bootstrapPhase pv
+          then getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gai)
+          else getLastEnactedCommittee `shouldReturn` SNothing
       it "CommitteeUpdate" $ do
         (spoK1, _, _) <- setupPoolWithStake $ Coin 100_000_000
         _ <- setupPoolWithStake $ Coin 100_000_000
@@ -420,11 +547,14 @@ spoVotesCommitteeUpdates =
         whenPostBootstrap (modifyPParams $ ppDRepVotingThresholdsL .~ def)
         cc <- KeyHashObj <$> freshKeyHash
         gai <- submitUpdateCommittee Nothing mempty [(cc, EpochInterval 5)] (1 %! 2)
-        -- 1 % 4 stake yes; 3 % 4 stake abstain; yes / stake - abstain > 1 % 2
+        -- bootstrap: 1 % 4 stake yes; 3 % 4 stake abstain; yes / stake - abstain > 1 % 2
+        -- post-bootstrap: 1 % 4 stake yes; 3 % 4 stake no; yes stake < 1 % 2
         submitYesVote_ (StakePoolVoter spoK1) gai
         passNEpochs 2
-        getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gai)
-
+        pv <- getProtVer
+        if bootstrapPhase pv
+          then getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId gai)
+          else getLastEnactedCommittee `shouldReturn` SNothing
 spoVotesForHardForkInitiation ::
   forall era.
   ConwayEraImp era =>
@@ -467,7 +597,7 @@ votingSpec =
       initMinFeeA <- getsNES $ nesEsL . curPParamsEpochStateL . ppMinFeeAL
       gaidThreshold <- impAnn "Update StakePool thresholds" $ do
         pp <- getsNES $ nesEsL . curPParamsEpochStateL
-        (pp ^. ppPoolVotingThresholdsL . pvtPPSecurityGroupL) `shouldBe` minBound
+        (pp ^. ppPoolVotingThresholdsL . pvtPPSecurityGroupL) `shouldBe` (51 %! 100)
         rew <- registerRewardAccount
         let ppUpdate =
               emptyPParamsUpdate
@@ -540,11 +670,13 @@ votingSpec =
           (drep1, KeyHashObj stakingKH1, paymentKP1) <- setupSingleDRep 1_000_000_000
           -- Setup DRep delegation #2
           _ <- setupSingleDRep 1_000_000_000
+          (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
           -- Submit a committee proposal
           cc <- KeyHashObj <$> freshKeyHash
           addCCGaid <- submitUpdateCommittee Nothing mempty [(cc, EpochInterval 10)] (75 %! 100)
           -- Submit the vote
           submitVote_ VoteYes (DRepVoter drep1) addCCGaid
+          submitYesVote_ (StakePoolVoter spoC) addCCGaid
           passNEpochs 2
           -- The vote should not result in a ratification
           isDRepAccepted addCCGaid `shouldReturn` False
@@ -561,11 +693,13 @@ votingSpec =
           (drep1, staking1, _) <- setupSingleDRep 1_000_000_000
           -- Setup DRep delegation #2
           _ <- setupSingleDRep 1_000_000_000
+          (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
           -- Submit a committee proposal
           cc <- KeyHashObj <$> freshKeyHash
           addCCGaid <- submitUpdateCommittee Nothing mempty [(cc, EpochInterval 10)] (75 %! 100)
           -- Submit the vote
           submitVote_ VoteYes (DRepVoter drep1) addCCGaid
+          submitYesVote_ (StakePoolVoter spoC) addCCGaid
           passNEpochs 2
           -- The vote should not result in a ratification
           isDRepAccepted addCCGaid `shouldReturn` False
@@ -599,6 +733,7 @@ votingSpec =
           lookupReward (KeyHashObj stakingKH1) `shouldReturn` govActionDeposit
           -- Setup DRep delegation #2
           (_drepKH2, stakingKH2) <- setupDRepWithoutStake
+          (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
           -- Add rewards to delegation #2
           submitAndExpireProposalToMakeReward $ KeyHashObj stakingKH2
           lookupReward (KeyHashObj stakingKH2) `shouldReturn` govActionDeposit
@@ -609,6 +744,7 @@ votingSpec =
           addCCGaid <- submitUpdateCommittee Nothing mempty [(cc, lifetime)] (75 %! 100)
           -- Submit the vote
           submitVote_ VoteYes (DRepVoter $ KeyHashObj drepKH1) addCCGaid
+          submitYesVote_ (StakePoolVoter spoC) addCCGaid
           passNEpochs 2
           -- The vote should not result in a ratification
           isDRepAccepted addCCGaid `shouldReturn` False
@@ -629,6 +765,7 @@ votingSpec =
             (drepKH1, stakingKH1) <- setupDRepWithoutStake
             -- Setup DRep delegation #2
             (_drepKH2, _stakingKH2, _paymentKP2) <- setupSingleDRep 1_000_000
+            (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
             -- Make a note of the reward account for the delegator to DRep #1
             dRepRewardAccount <- getRewardAccountFor $ KeyHashObj stakingKH1
             -- Submit the first committee proposal, the one we will test active voting stake against.
@@ -647,6 +784,7 @@ votingSpec =
                   }
             -- Submit the vote from DRep #1
             submitVote_ VoteYes (DRepVoter $ KeyHashObj drepKH1) addCCGaid
+            submitYesVote_ (StakePoolVoter spoC) addCCGaid
             passNEpochs 2
             -- The vote should not result in a ratification
             isDRepAccepted addCCGaid `shouldReturn` False
@@ -674,6 +812,7 @@ votingSpec =
             (_drepKH2, _stakingKH2, _paymentKP2) <- setupSingleDRep 1_000_000
             -- Setup DRep delegation #3
             (_drepKH3, stakingKH3) <- setupDRepWithoutStake
+            (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
             -- Make a note of the reward accounts for the delegators to DReps #1 and #3
             dRepRewardAccount1 <- getRewardAccountFor $ KeyHashObj stakingKH1
             dRepRewardAccount3 <- getRewardAccountFor $ KeyHashObj stakingKH3
@@ -706,6 +845,7 @@ votingSpec =
                 }
             -- Submit the vote from DRep #1
             submitVote_ VoteYes (DRepVoter $ KeyHashObj drepKH1) addCCGaid
+            submitYesVote_ (StakePoolVoter spoC) addCCGaid
             passNEpochs 2
             -- The vote should not result in a ratification
             isDRepAccepted addCCGaid `shouldReturn` False
@@ -725,7 +865,7 @@ votingSpec =
       describe "Predefined DReps" $ do
         it "acceptedRatio with default DReps" $ do
           (drep1, _, committeeGovId) <- electBasicCommittee
-          (drep2, drep2Staking, _) <- setupSingleDRep 1_000_000
+          (_, drep2Staking, _) <- setupSingleDRep 1_000_000
 
           paramChangeGovId <- submitParameterChange SNothing $ def & ppuMinFeeAL .~ SJust (Coin 3000)
           submitYesVote_ (DRepVoter drep1) paramChangeGovId
@@ -733,12 +873,14 @@ votingSpec =
           passEpoch
           calculateDRepAcceptedRatio paramChangeGovId `shouldReturn` 1 % 2
 
-          _ <- delegateToDRep 1_000_000 DRepAlwaysNoConfidence
+          kh <- freshKeyHash
+          _ <- registerStakeCredential (KeyHashObj kh)
+          _ <- delegateToDRep (KeyHashObj kh) (Coin 1_000_000) DRepAlwaysNoConfidence
           passEpoch
           -- AlwaysNoConfidence vote acts like a 'No' vote for actions other than NoConfidence
           calculateDRepAcceptedRatio paramChangeGovId `shouldReturn` 1 % 3
 
-          redelegateDRep drep2 DRepAlwaysAbstain drep2Staking
+          _ <- delegateToDRep drep2Staking zero DRepAlwaysAbstain
           passEpoch
           -- AlwaysAbstain vote acts like 'Abstain' vote
           calculateDRepAcceptedRatio paramChangeGovId `shouldReturn` 1 % 2
@@ -760,10 +902,12 @@ votingSpec =
           -- in order to make it necessary to redelegate to AlwaysNoConfidence,
           -- rather than just unregister
           (drep3, _, _) <- setupSingleDRep 1_000_000
+          (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
 
           noConfidenceGovId <- submitGovAction $ NoConfidence (SJust committeeGovId)
           submitYesVote_ (DRepVoter drep1) noConfidenceGovId
           submitVote_ VoteNo (DRepVoter drep3) noConfidenceGovId
+          submitYesVote_ (StakePoolVoter spoC) noConfidenceGovId
           passEpoch
           -- drep1 doesn't have enough stake to enact NoConfidence
           isDRepAccepted noConfidenceGovId `shouldReturn` False
@@ -775,21 +919,15 @@ votingSpec =
           passEpoch
           isDRepAccepted noConfidenceGovId `shouldReturn` False
 
-          submitTxAnn_ "Redelegate to AlwaysNoConfidence " $
-            mkBasicTx mkBasicTxBody
-              & bodyTxL . certsTxBodyL
-                .~ SSeq.fromList
-                  [ DelegTxCert @era
-                      drep2Staking
-                      (DelegVote DRepAlwaysNoConfidence)
-                  ]
+          _ <- delegateToDRep drep2Staking zero DRepAlwaysNoConfidence
           passEpoch
           isDRepAccepted noConfidenceGovId `shouldReturn` True
           passEpoch
           getCommitteeMembers `shouldReturn` mempty
-
         it "AlwaysAbstain" $ do
           let getTreasury = getsNES (nesEsL . esAccountStateL . asTreasuryL)
+
+          donateToTreasury $ Coin 5_000_000
 
           (drep1, comMember, _) <- electBasicCommittee
           initialTreasury <- getTreasury
@@ -808,7 +946,7 @@ votingSpec =
           passEpoch
           getTreasury `shouldReturn` initialTreasury
 
-          redelegateDRep drep2 DRepAlwaysAbstain drep2Staking
+          _ <- delegateToDRep drep2Staking zero DRepAlwaysAbstain
 
           passEpoch
           -- the delegation turns the No vote into an Abstain, enough to pass the action
@@ -823,7 +961,9 @@ votingSpec =
               & ppDRepVotingThresholdsL . dvtMotionNoConfidenceL .~ 1 %! 1
               & ppCoinsPerUTxOByteL .~ CoinPerByte (Coin 1)
           (drep, _, committeeId) <- electBasicCommittee
-          _ <- delegateToDRep 300 DRepAlwaysNoConfidence
+          kh <- freshKeyHash
+          _ <- registerStakeCredential (KeyHashObj kh)
+          _ <- delegateToDRep (KeyHashObj kh) (Coin 300) DRepAlwaysNoConfidence
           noConfidence <- submitGovAction (NoConfidence (SJust committeeId))
           submitYesVote_ (DRepVoter drep) noConfidence
           logAcceptedRatio noConfidence
@@ -1074,6 +1214,82 @@ votingSpec =
             passNEpochs 2
             -- The same vote should now successfully ratify the proposal
             getLastEnactedCommittee `shouldReturn` SJust (GovPurposeId addCCGaid)
+    describe "Interaction between governing bodies" $ do
+      it "Motion of no-confidence" $ do
+        (drep, _, committeeGovId) <- electBasicCommittee
+        (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000
+        initialMembers <- getCommitteeMembers
+        noConfidenceGovId <- submitGovAction $ NoConfidence (SJust committeeGovId)
+
+        submitYesVote_ (DRepVoter drep) noConfidenceGovId
+        submitVote_ VoteNo (StakePoolVoter spoC) noConfidenceGovId
+        passNEpochs 2
+
+        -- DReps accepted the proposal
+        isDRepAccepted noConfidenceGovId `shouldReturn` True
+        -- SPOs voted no, so NoConfidence won't be ratified, thus committee remains the same
+        isSpoAccepted noConfidenceGovId `shouldReturn` False
+        getCommitteeMembers `shouldReturn` initialMembers
+      it "Update committee - normal state" $ do
+        (drep, _, committeeGovId) <- electBasicCommittee
+        (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000
+        SJust initialCommittee <- getsNES $ newEpochStateGovStateL . committeeGovStateL
+        let initialThreshold = initialCommittee ^. committeeThresholdL
+        gid <- submitGovAction $ UpdateCommittee (SJust committeeGovId) mempty mempty (1 %! 100)
+
+        submitYesVote_ (DRepVoter drep) gid
+        submitVote_ VoteNo (StakePoolVoter spoC) gid
+        passNEpochs 2
+
+        -- DReps accepted the proposal
+        isDRepAccepted gid `shouldReturn` True
+        -- SPOs voted no, so committee won't be updated
+        isSpoAccepted gid `shouldReturn` False
+        getLastEnactedCommittee `shouldReturn` SJust committeeGovId
+        SJust currentCommittee <- getsNES $ newEpochStateGovStateL . committeeGovStateL
+        currentCommittee ^. committeeThresholdL `shouldBe` initialThreshold
+      it "Hard-fork initiation" $ do
+        ccMembers <- registerInitialCommittee
+        (drep, _, _) <- setupSingleDRep 1_000_000
+        (spoC, _, _) <- setupPoolWithStake $ Coin 1_000_000
+        curProtVer <- getProtVer
+        nextMajorVersion <- succVersion $ pvMajor curProtVer
+        let nextProtVer = curProtVer {pvMajor = nextMajorVersion}
+        gid <- submitGovAction $ HardForkInitiation SNothing nextProtVer
+
+        submitYesVoteCCs_ ccMembers gid
+        submitYesVote_ (StakePoolVoter spoC) gid
+        passNEpochs 2
+
+        -- No changes so far, since DReps haven't voted yet
+        getProtVer `shouldReturn` curProtVer
+        submitYesVote_ (DRepVoter drep) gid
+        passNEpochs 2
+        -- DReps voted yes too for the hard-fork, so protocol version is incremented
+        getProtVer `shouldReturn` nextProtVer
+      it
+        "A governance action is automatically ratified if threshold is set to 0 for all related governance bodies"
+        $ do
+          modifyPParams $ \pp ->
+            pp
+              & ppPoolVotingThresholdsL . pvtMotionNoConfidenceL .~ 0 %! 1
+              & ppDRepVotingThresholdsL . dvtMotionNoConfidenceL .~ 0 %! 1
+          (_drep, _, committeeGovId) <- electBasicCommittee
+          _ <- setupPoolWithStake $ Coin 1_000_000
+
+          -- There is a committee initially
+          getCommitteeMembers `shouldNotReturn` mempty
+
+          noConfidenceGovId <- submitGovAction $ NoConfidence (SJust committeeGovId)
+
+          -- No votes were made but due to the 0 thresholds, every governance body accepted the gov action by default...
+          isDRepAccepted noConfidenceGovId `shouldReturn` True
+          isSpoAccepted noConfidenceGovId `shouldReturn` True
+          -- ...even the committee which is not allowed to vote on `NoConfidence` action
+          isCommitteeAccepted noConfidenceGovId `shouldReturn` True
+          passNEpochs 2
+          -- `NoConfidence` is ratified -> the committee is no more
+          getCommitteeMembers `shouldReturn` mempty
 
 delayingActionsSpec ::
   forall era.
@@ -1222,20 +1438,11 @@ delayingActionsSpec =
         getLastEnactedParameterChange `shouldReturn` SNothing
         getParameterChangeProposals `shouldReturn` Map.empty
       it "proposals to update the committee get delayed if the expiration exceeds the max term" $ do
-        let expectMembers ::
-              HasCallStack => Set.Set (Credential 'ColdCommitteeRole (EraCrypto era)) -> ImpTestM era ()
-            expectMembers expKhs = do
-              committee <-
-                getsNES $
-                  nesEsL . esLStateL . lsUTxOStateL . utxosGovStateL . committeeGovStateL
-              let members = Map.keysSet $ foldMap' committeeMembers committee
-              impAnn "Expecting committee members" $ members `shouldBe` expKhs
         (drep, _, _) <- setupSingleDRep 1_000_000
-        maxTermLength <-
-          getsNES $
-            nesEsL . esLStateL . lsUTxOStateL . utxosGovStateL . curPParamsGovStateL . ppCommitteeMaxTermLengthL
+        (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
+        maxTermLength <- getsNES $ nesEsL . curPParamsEpochStateL . ppCommitteeMaxTermLengthL
 
-        void registerInitialCommittee
+        hks <- registerInitialCommittee
         initialMembers <- getCommitteeMembers
 
         (membersExceedingExpiry, exceedingExpiry) <-
@@ -1246,14 +1453,15 @@ delayingActionsSpec =
             c4 <- freshKeyHash
             currentEpoch <- getsNES nesELL
             let exceedingExpiry = addEpochInterval (addEpochInterval currentEpoch maxTermLength) (EpochInterval 7)
-            let membersExceedingExpiry = [(KeyHashObj c3, exceedingExpiry), (KeyHashObj c4, addEpochInterval currentEpoch maxTermLength)]
-            _ <-
+                membersExceedingExpiry = [(KeyHashObj c3, exceedingExpiry), (KeyHashObj c4, addEpochInterval currentEpoch maxTermLength)]
+            GovPurposeId gaid <-
               electCommittee
                 SNothing
                 drep
                 Set.empty
                 membersExceedingExpiry
-            passEpoch >> passEpoch
+            submitYesVote_ (StakePoolVoter spoC) gaid
+            passNEpochs 2
             -- the new committee has not been enacted
             expectMembers initialMembers
             pure (Map.keysSet membersExceedingExpiry, exceedingExpiry)
@@ -1262,10 +1470,9 @@ delayingActionsSpec =
         govIdConst1 <- impAnn "Other actions are ratified and enacted" $ do
           (govIdConst1, constitution) <- submitConstitution SNothing
           submitYesVote_ (DRepVoter drep) govIdConst1
-          hks <- traverse registerCommitteeHotKey (Set.toList initialMembers)
-          traverse_ (\m -> submitYesVote_ (CommitteeVoter m) govIdConst1) hks
+          submitYesVoteCCs_ hks govIdConst1
 
-          passEpoch >> passEpoch
+          passNEpochs 2
           curConstitution <- getsNES $ newEpochStateGovStateL . constitutionGovStateL
           curConstitution `shouldBe` constitution
           pure govIdConst1
@@ -1286,9 +1493,158 @@ delayingActionsSpec =
         impAnn "New committee can vote" $ do
           (govIdConst2, constitution) <- submitConstitution $ SJust (GovPurposeId govIdConst1)
           submitYesVote_ (DRepVoter drep) govIdConst2
-          hks <- traverse registerCommitteeHotKey (Set.toList membersExceedingExpiry)
-          traverse_ (\m -> submitYesVote_ (CommitteeVoter m) govIdConst2) hks
+          hks' <- traverse registerCommitteeHotKey (Set.toList membersExceedingExpiry)
+          submitYesVoteCCs_ hks' govIdConst2
 
-          passEpoch >> passEpoch
+          passNEpochs 2
           curConstitution <- getsNES $ newEpochStateGovStateL . constitutionGovStateL
           curConstitution `shouldBe` constitution
+
+committeeMaxTermLengthSpec ::
+  forall era.
+  ConwayEraImp era =>
+  SpecWith (ImpTestState era)
+committeeMaxTermLengthSpec =
+  describe "Committee members can serve full `CommitteeMaxTermLength`" $ do
+    let
+      electMembersWithMaxTermLength ::
+        KeyHash 'StakePool (EraCrypto era) ->
+        Credential 'DRepRole (EraCrypto era) ->
+        ImpTestM era [Credential 'ColdCommitteeRole (EraCrypto era)]
+      electMembersWithMaxTermLength spoC drep = do
+        m1 <- KeyHashObj <$> freshKeyHash
+        m2 <- KeyHashObj <$> freshKeyHash
+        currentEpoch <- getsNES nesELL
+        maxTermLength <-
+          getsNES $
+            nesEsL . curPParamsEpochStateL . ppCommitteeMaxTermLengthL
+        let expiry = addEpochInterval (addEpochInterval currentEpoch $ EpochInterval 1) maxTermLength
+            members = [(m1, expiry), (m2, expiry)]
+        GovPurposeId gaid <-
+          electCommittee
+            SNothing
+            drep
+            Set.empty
+            members
+        submitYesVote_ (StakePoolVoter spoC) gaid
+        pure [m1, m2]
+    it "maxTermLength = 0" $ do
+      -- ======== EPOCH e ========
+
+      let termLength = EpochInterval 0
+      modifyPParams $ \pp ->
+        pp
+          & ppCommitteeMaxTermLengthL .~ termLength
+
+      (drep, _, _) <- setupSingleDRep 1_000_000
+      (spoC, _, _) <- setupPoolWithStake $ Coin 10_000_000
+      initialMembers <- getCommitteeMembers
+
+      -- Setup new committee members with max term length of 0 epoch
+      newMembers <- electMembersWithMaxTermLength spoC drep
+
+      curProtVer <- getProtVer
+      nextMajorVersion <- succVersion $ pvMajor curProtVer
+      let nextProtVer = curProtVer {pvMajor = nextMajorVersion}
+
+      -- Create a proposal for a hard-fork initiation
+      gid <- submitGovAction $ HardForkInitiation SNothing nextProtVer
+
+      -- Accept the proposal with all the governing bodies except for the CC
+      submitYesVote_ (StakePoolVoter spoC) gid
+      submitYesVote_ (DRepVoter drep) gid
+
+      passEpoch
+      -- ======== EPOCH e+1 ========
+
+      hotCs <- mapM registerCommitteeHotKey newMembers
+      -- CC members can now vote for the hard-fork
+      submitYesVoteCCs_ hotCs gid
+
+      -- Although elected, new CC members are not yet active at this point
+      -- since it takes two epochs for their election to take effect, hence
+      -- the check fails
+      isCommitteeAccepted gid `shouldReturn` False
+      mapM_ expectCommitteeMemberAbsence newMembers
+
+      passEpoch
+      -- ======== EPOCH e+2 ========
+
+      -- Two epochs passed since the proposal and all the governing bodies except the
+      -- CC have voted 'Yes' for the hard-fork immediately. However, since the CC could only
+      -- vote in the next epoch, the hard-fork is not yet enacted...
+      getLastEnactedHardForkInitiation `shouldReturn` SNothing
+      -- ...but now we can see that the CC accepted the proposal...
+      isCommitteeAccepted gid `shouldReturn` True
+      -- ...and that they are elected members now, albeit already expired ones
+      expectMembers $ initialMembers <> Set.fromList newMembers
+      mapM_ ccShouldBeExpired newMembers
+
+      passEpoch
+      -- ======== EPOCH e+3 ========
+
+      -- Two epochs passed since the CCs also accepted the hard-fork, however
+      -- it didn't get enacted because the CCs expired by now and thus
+      -- their votes don't count
+      getLastEnactedHardForkInitiation `shouldReturn` SNothing
+      getProtVer `shouldReturn` curProtVer
+      isCommitteeAccepted gid `shouldReturn` False
+    it "maxTermLength = 1" $ do
+      -- ======== EPOCH e ========
+
+      let termLength = EpochInterval 1
+      modifyPParams $ \pp ->
+        pp
+          & ppCommitteeMaxTermLengthL .~ termLength
+
+      (drep, _, _) <- setupSingleDRep 1_000_000
+      (spoC, _, _) <- setupPoolWithStake $ Coin 10_000_000
+      initialMembers <- getCommitteeMembers
+
+      -- Setup new committee members with max term length of 1 epoch
+      newMembers <- electMembersWithMaxTermLength spoC drep
+
+      curProtVer <- getProtVer
+      nextMajorVersion <- succVersion $ pvMajor curProtVer
+      let nextProtVer = curProtVer {pvMajor = nextMajorVersion}
+
+      -- Create a proposal for a hard-fork initiation
+      gid <- submitGovAction $ HardForkInitiation SNothing nextProtVer
+
+      -- Accept the proposal with all the governing bodies except for the CC
+      submitYesVote_ (StakePoolVoter spoC) gid
+      submitYesVote_ (DRepVoter drep) gid
+
+      passEpoch
+      -- ======== EPOCH e+1 ========
+
+      hotCs <- mapM registerCommitteeHotKey newMembers
+      -- CC members can now vote for the hard-fork
+      submitYesVoteCCs_ hotCs gid
+
+      -- Although elected, new CC members are not yet active at this point
+      -- since it takes two epochs for their election to take effect, hence
+      -- the check fails
+      isCommitteeAccepted gid `shouldReturn` False
+      mapM_ expectCommitteeMemberAbsence newMembers
+
+      passEpoch
+      -- ======== EPOCH e+2 ========
+
+      -- Two epochs passed since the proposal and all the governing bodies except the
+      -- CC have voted 'Yes' for the hard-fork immediately. However, since the CC could only
+      -- vote in the next epoch, the hard-fork is not yet enacted...
+      getLastEnactedHardForkInitiation `shouldReturn` SNothing
+      -- ...but now we can see that the CC accepted the proposal...
+      isCommitteeAccepted gid `shouldReturn` True
+      -- ...and that they are active elected members now
+      expectMembers $ initialMembers <> Set.fromList newMembers
+      mapM_ ccShouldNotBeExpired newMembers
+
+      passEpoch
+      -- ======== EPOCH e+3 ========
+
+      -- Two epochs passed since the CCs also accepted the hard-fork, which
+      -- is now enacted since the CCs were active during the check
+      getLastEnactedHardForkInitiation `shouldReturn` SJust (GovPurposeId gid)
+      getProtVer `shouldReturn` nextProtVer

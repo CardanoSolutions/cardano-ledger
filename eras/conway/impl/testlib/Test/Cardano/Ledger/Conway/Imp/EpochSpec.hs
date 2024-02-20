@@ -28,7 +28,6 @@ import Cardano.Ledger.Shelley.LedgerState
 import Cardano.Ledger.Shelley.Rules (Event, ShelleyTickEvent (..))
 import Cardano.Ledger.Val
 import Control.Monad.Writer (listen)
-import Data.Data (cast)
 import Data.Default.Class (Default (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
@@ -36,6 +35,7 @@ import Data.Maybe.Strict (StrictMaybe (..))
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
 import Data.Tree
+import Data.Typeable (cast)
 import Lens.Micro
 import Test.Cardano.Ledger.Conway.ImpTest
 import Test.Cardano.Ledger.Core.Rational (IsRatio (..), (%!))
@@ -328,10 +328,10 @@ dRepSpec =
       expectActualDRepExpiry drep2 $ offDRepActivity 12
 
     it "DRep registration should succeed" $ do
-      logEntry "Stake distribution before DRep registration:"
+      logString "Stake distribution before DRep registration:"
       logStakeDistr
       _ <- registerDRep
-      logEntry "Stake distribution after DRep registration:"
+      logString "Stake distribution after DRep registration:"
       logStakeDistr
       passEpoch
 
@@ -351,17 +351,19 @@ dRepVotingSpec =
 
       -- Submit NewConstitution proposal two epoch too early to check that the action
       -- doesn't expire prematurely (ppGovActionLifetimeL is set to two epochs)
-      logEntry "Submitting new minFee proposal"
+      logString "Submitting new minFee proposal"
       gid <- submitParameterChange SNothing proposedUpdate
 
       committeeHotCreds <- registerInitialCommittee
       (dRepCred, _, _) <- setupSingleDRep 1_000_000
+      (spoC, _, _) <- setupPoolWithStake $ Coin 42_000_000
       passEpoch
       logRatificationChecks gid
       do
         isAccepted <- isDRepAccepted gid
         assertBool "Gov action should not be accepted" $ not isAccepted
       submitYesVote_ (DRepVoter dRepCred) gid
+      submitYesVote_ (StakePoolVoter spoC) gid
       submitYesVoteCCs_ committeeHotCreds gid
       logAcceptedRatio gid
       do
@@ -488,12 +490,15 @@ eventsSpec = describe "Events" $ do
       whenPostBootstrap (modifyPParams $ ppDRepVotingThresholdsL . dvtPPEconomicGroupL .~ def)
       propDeposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppGovActionDepositL
       let
-        proposeCostModel = do
+        proposeParameterChange = do
           newVal <- arbitrary
-          submitParameterChange SNothing $ def & ppuCoinsPerUTxOByteL .~ SJust newVal
-      proposalA <- impAnn "proposalA" proposeCostModel
-      proposalB <- impAnn "proposalB" proposeCostModel
+          proposal <- submitParameterChange SNothing $ def & ppuCoinsPerUTxOByteL .~ SJust newVal
+          pure
+            (proposal, (getsNES $ nesEsL . curPParamsEpochStateL . ppCoinsPerUTxOByteL) `shouldReturn` newVal)
+      (proposalA, checkProposedParameterA) <- proposeParameterChange
+      (proposalB, _) <- proposeParameterChange
       rewardAccount@(RewardAccount _ rewardCred) <- registerRewardAccount
+      passEpoch -- prevent proposalC expiry and force it's deletion due to conflit.
       proposalC <- impAnn "proposalC" $ do
         newVal <- arbitrary
         submitProposal
@@ -515,9 +520,9 @@ eventsSpec = describe "Events" $ do
           (_, evs) <- listen passEpoch
           filter isGovInfoEvent evs
             `shouldBeExpr` [ SomeSTSEvent @era @"TICK" . injectEvent $
-                              GovInfoEvent mempty mempty mempty
+                              GovInfoEvent mempty mempty mempty mempty
                            ]
-      replicateM_ (fromIntegral actionLifetime) passEpochWithNoDroppedActions
+      replicateM_ (fromIntegral actionLifetime - 1) passEpochWithNoDroppedActions
       logAcceptedRatio proposalA
       submitYesVote_ (StakePoolVoter spoCred) proposalA
       submitYesVoteCCs_ ccCreds proposalA
@@ -530,12 +535,14 @@ eventsSpec = describe "Events" $ do
             .~ SSeq.singleton (UnRegTxCert rewardCred)
       passEpochWithNoDroppedActions
       (_, evs) <- listen passEpoch
+      checkProposedParameterA
       let
         filteredEvs = filter isGovInfoEvent evs
       filteredEvs
         `shouldBeExpr` [ SomeSTSEvent @era @"TICK" . injectEvent $
                           GovInfoEvent
                             (Set.singleton gasA)
-                            (Set.fromList [gasB, gasC])
-                            (Set.singleton proposalC)
+                            (Set.singleton gasC)
+                            (Set.singleton gasB)
+                            (Map.singleton proposalC propDeposit)
                        ]

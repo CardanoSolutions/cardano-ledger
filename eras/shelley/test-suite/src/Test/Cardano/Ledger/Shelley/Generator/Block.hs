@@ -37,6 +37,7 @@ import Cardano.Protocol.TPraos.Rules.Overlay (OBftSlot (..), lookupInOverlaySche
 import Cardano.Protocol.TPraos.Rules.Prtcl (PrtclState (..))
 import Cardano.Protocol.TPraos.Rules.Tickn (TicknState (..))
 import Cardano.Slotting.Slot (WithOrigin (..))
+import Control.Monad (unless)
 import Control.SetAlgebra (dom, eval)
 import Data.Coerce (coerce)
 import Data.Foldable (toList)
@@ -48,6 +49,7 @@ import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Lens.Micro ((^.))
 import Lens.Micro.Extras (view)
+import Test.Cardano.Ledger.Common (tracedDiscard)
 import Test.Cardano.Ledger.Core.KeyPair (vKey)
 import Test.Cardano.Ledger.Shelley.ConcreteCryptoTypes (
   Mock,
@@ -73,7 +75,7 @@ import Test.Cardano.Ledger.Shelley.Utils (
 import Test.Cardano.Protocol.TPraos.Create (VRFKeyPair (..))
 import Test.Control.State.Transition.Trace.Generator.QuickCheck (sigGen)
 import qualified Test.Control.State.Transition.Trace.Generator.QuickCheck as QC
-import Test.QuickCheck (Gen, discard)
+import Test.QuickCheck (Gen)
 import qualified Test.QuickCheck as QC (choose)
 
 -- ======================================================
@@ -178,9 +180,19 @@ genBlockWithTxGen
         <*> pure (fromIntegral (m * fromIntegral maxKESIterations))
         <*> pure oCert
     let hView = makeHeaderView (bheader theBlock)
-    if bhviewBSize hView <= pp ^. ppMaxBBSizeL && bhviewHSize hView <= fromIntegral (pp ^. ppMaxBHSizeL)
-      then pure theBlock
-      else discard
+    unless (bhviewBSize hView <= pp ^. ppMaxBBSizeL) $
+      tracedDiscard $
+        "genBlockWithTxGen: bhviewBSize too large"
+          <> show (bhviewBSize hView)
+          <> " vs "
+          <> show (pp ^. ppMaxBBSizeL)
+    unless (bhviewHSize hView <= fromIntegral (pp ^. ppMaxBHSizeL)) $
+      tracedDiscard $
+        "genBlockWithTxGen: bhviewHSize too large"
+          <> show (bhviewHSize hView)
+          <> " vs "
+          <> show (pp ^. ppMaxBHSizeL)
+    pure theBlock
     where
       -- This is safe to take form the original chain state, since we only tick
       -- it forward; no new blocks will have been applied.

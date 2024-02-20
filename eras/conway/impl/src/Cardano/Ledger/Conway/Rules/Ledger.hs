@@ -50,6 +50,7 @@ import Cardano.Ledger.Conway.Era (
   ConwayEra,
   ConwayGOV,
   ConwayLEDGER,
+  ConwayMEMPOOL,
   ConwayUTXOW,
  )
 import Cardano.Ledger.Conway.Governance (
@@ -75,13 +76,15 @@ import Cardano.Ledger.Conway.Rules.Gov (
   GovSignal (..),
  )
 import Cardano.Ledger.Conway.Rules.GovCert (ConwayGovCertPredFailure)
+import Cardano.Ledger.Conway.Rules.Mempool (ConwayMempoolEvent (..), ConwayMempoolPredFailure (..))
 import Cardano.Ledger.Conway.Rules.Utxo (ConwayUtxoPredFailure)
 import Cardano.Ledger.Conway.Rules.Utxos (ConwayUtxosPredFailure)
 import Cardano.Ledger.Conway.Rules.Utxow (ConwayUtxowPredFailure)
 import Cardano.Ledger.Conway.UTxO (txNonDistinctRefScriptsSize)
-import Cardano.Ledger.Credential (Credential)
+import Cardano.Ledger.Credential (Credential (..), credKeyHash)
 import Cardano.Ledger.Crypto (Crypto (..))
-import Cardano.Ledger.Keys (KeyRole (..))
+import Cardano.Ledger.Keys (KeyHash, KeyRole (..))
+import qualified Cardano.Ledger.Shelley.HardForks as HF (bootstrapPhase)
 import Cardano.Ledger.Shelley.LedgerState (
   CertState (..),
   DState (..),
@@ -104,28 +107,30 @@ import Cardano.Ledger.Shelley.Rules (
   shelleyLedgerAssertions,
  )
 import Cardano.Ledger.Slot (epochInfoEpoch)
-import Cardano.Ledger.UMap (UView (..), dRepMap)
+import Cardano.Ledger.UMap (UView (..))
 import qualified Cardano.Ledger.UMap as UMap
 import Cardano.Ledger.UTxO (EraUTxO (..))
 import Control.DeepSeq (NFData)
-import Control.Monad (when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Trans.Reader (asks)
 import Control.State.Transition.Extended (
   Embed (..),
   STS (..),
   TRC (..),
   TransitionRule,
+  failOnNonEmpty,
   judgmentContext,
   liftSTS,
   trans,
   (?!),
  )
 import Data.Kind (Type)
+import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence.Strict as StrictSeq
-import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
 import GHC.Generics (Generic (..))
 import Lens.Micro as L
 import NoThunks.Class (NoThunks (..))
@@ -134,7 +139,7 @@ data ConwayLedgerPredFailure era
   = ConwayUtxowFailure (PredicateFailure (EraRule "UTXOW" era))
   | ConwayCertsFailure (PredicateFailure (EraRule "CERTS" era))
   | ConwayGovFailure (PredicateFailure (EraRule "GOV" era))
-  | ConwayWdrlNotDelegatedToDRep (Set (Credential 'Staking (EraCrypto era)))
+  | ConwayWdrlNotDelegatedToDRep (NonEmpty (KeyHash 'Staking (EraCrypto era)))
   | ConwayTreasuryValueMismatch
       -- | Actual
       Coin
@@ -145,6 +150,7 @@ data ConwayLedgerPredFailure era
       Int
       -- | Maximum allowed total reference script size
       Int
+  | ConwayMempoolFailure Text
   deriving (Generic)
 
 -- | In the next era this will become a proper protocol parameter. For now this is a hard
@@ -210,6 +216,9 @@ instance InjectRuleFailure "LEDGER" ConwayGovCertPredFailure (ConwayEra c) where
 instance InjectRuleFailure "LEDGER" ConwayGovPredFailure (ConwayEra c) where
   injectFailure = ConwayGovFailure
 
+instance InjectRuleFailure "LEDGER" ConwayMempoolPredFailure (ConwayEra c) where
+  injectFailure (ConwayMempoolPredFailure t) = ConwayMempoolFailure t
+
 deriving instance
   ( Era era
   , Eq (PredicateFailure (EraRule "UTXOW" era))
@@ -260,6 +269,7 @@ instance
       ConwayTreasuryValueMismatch actual submitted ->
         Sum (ConwayTreasuryValueMismatch @era) 5 !> To actual !> To submitted
       ConwayTxRefScriptsSizeTooBig x y -> Sum ConwayTxRefScriptsSizeTooBig 6 !> To x !> To y
+      ConwayMempoolFailure t -> Sum ConwayMempoolFailure 7 !> To t
 
 instance
   ( Era era
@@ -277,18 +287,21 @@ instance
       4 -> SumD ConwayWdrlNotDelegatedToDRep <! From
       5 -> SumD ConwayTreasuryValueMismatch <! From <! From
       6 -> SumD ConwayTxRefScriptsSizeTooBig <! From <! From
+      7 -> SumD ConwayMempoolFailure <! From
       n -> Invalid n
 
 data ConwayLedgerEvent era
   = UtxowEvent (Event (EraRule "UTXOW" era))
   | CertsEvent (Event (EraRule "CERTS" era))
   | GovEvent (Event (EraRule "GOV" era))
+  | MempoolEvent (Event (EraRule "MEMPOOL" era))
   deriving (Generic)
 
 deriving instance
   ( Eq (Event (EraRule "CERTS" era))
   , Eq (Event (EraRule "UTXOW" era))
   , Eq (Event (EraRule "GOV" era))
+  , Eq (Event (EraRule "MEMPOOL" era))
   ) =>
   Eq (ConwayLedgerEvent era)
 
@@ -296,6 +309,7 @@ instance
   ( NFData (Event (EraRule "CERTS" era))
   , NFData (Event (EraRule "UTXOW" era))
   , NFData (Event (EraRule "GOV" era))
+  , NFData (Event (EraRule "MEMPOOL" era))
   ) =>
   NFData (ConwayLedgerEvent era)
 
@@ -307,15 +321,19 @@ instance
   , Embed (EraRule "UTXOW" era) (ConwayLEDGER era)
   , Embed (EraRule "GOV" era) (ConwayLEDGER era)
   , Embed (EraRule "CERTS" era) (ConwayLEDGER era)
+  , Embed (EraRule "MEMPOOL" era) (ConwayLEDGER era)
   , State (EraRule "UTXOW" era) ~ UTxOState era
   , State (EraRule "CERTS" era) ~ CertState era
   , State (EraRule "GOV" era) ~ Proposals era
+  , State (EraRule "MEMPOOL" era) ~ LedgerState era
   , Environment (EraRule "UTXOW" era) ~ UtxoEnv era
   , Environment (EraRule "CERTS" era) ~ CertsEnv era
   , Environment (EraRule "GOV" era) ~ GovEnv era
+  , Environment (EraRule "MEMPOOL" era) ~ LedgerEnv era
   , Signal (EraRule "UTXOW" era) ~ Tx era
   , Signal (EraRule "CERTS" era) ~ Seq (TxCert era)
   , Signal (EraRule "GOV" era) ~ GovSignal era
+  , Signal (EraRule "MEMPOOL" era) ~ Tx era
   ) =>
   STS (ConwayLEDGER era)
   where
@@ -348,21 +366,31 @@ ledgerTransition ::
   , Embed (EraRule "UTXOW" era) (someLEDGER era)
   , Embed (EraRule "GOV" era) (someLEDGER era)
   , Embed (EraRule "CERTS" era) (someLEDGER era)
+  , Embed (EraRule "MEMPOOL" era) (someLEDGER era)
   , State (EraRule "UTXOW" era) ~ UTxOState era
   , State (EraRule "CERTS" era) ~ CertState era
   , State (EraRule "GOV" era) ~ Proposals era
+  , State (EraRule "MEMPOOL" era) ~ LedgerState era
   , Environment (EraRule "UTXOW" era) ~ UtxoEnv era
   , Environment (EraRule "GOV" era) ~ GovEnv era
   , Environment (EraRule "CERTS" era) ~ CertsEnv era
+  , Environment (EraRule "MEMPOOL" era) ~ LedgerEnv era
   , Signal (EraRule "UTXOW" era) ~ Tx era
   , Signal (EraRule "CERTS" era) ~ Seq (TxCert era)
   , Signal (EraRule "GOV" era) ~ GovSignal era
+  , Signal (EraRule "MEMPOOL" era) ~ Tx era
   , BaseM (someLEDGER era) ~ ShelleyBase
   , STS (someLEDGER era)
   ) =>
   TransitionRule (someLEDGER era)
 ledgerTransition = do
-  TRC (LedgerEnv slot _txIx pp account, LedgerState utxoState certState, tx) <- judgmentContext
+  TRC (le@(LedgerEnv slot _txIx pp account mempool), ls@(LedgerState utxoState certState), tx) <-
+    judgmentContext
+
+  when mempool $
+    void $
+      trans @(EraRule "MEMPOOL" era) $
+        TRC (le, ls, tx)
 
   currentEpoch <- liftSTS $ do
     ei <- asks epochInfoPure
@@ -389,6 +417,24 @@ ledgerTransition = do
             committee = govState ^. committeeGovStateL
             proposals = govState ^. proposalsGovStateL
             committeeProposals = proposalsWithPurpose grCommitteeL proposals
+
+        -- Starting with version 10, we don't allow withdrawals into RewardAcounts that are
+        -- KeyHashes and not delegated to Dreps.
+        --
+        -- We also need to make sure we are using the certState before certificates are applied,
+        -- because otherwise it would not be possible to unregister a reward account and withdraw
+        -- all funds from it in the same transaction.
+        unless (HF.bootstrapPhase (pp ^. ppProtocolVersionL)) $ do
+          let dUnified = dsUnified $ certDState certState
+              wdrls = unWithdrawals $ tx ^. bodyTxL . withdrawalsTxBodyL
+              delegatedAddrs = DRepUView dUnified
+              wdrlsKeyHashes =
+                Set.fromList
+                  [kh | (ra, _) <- Map.toList wdrls, Just kh <- [credKeyHash $ raCredential ra]]
+              nonExistentDelegations =
+                Set.filter (not . (`UMap.member` delegatedAddrs) . KeyHashObj) wdrlsKeyHashes
+          failOnNonEmpty nonExistentDelegations ConwayWdrlNotDelegatedToDRep
+
         certStateAfterCERTS <-
           trans @(EraRule "CERTS" era) $
             TRC
@@ -396,16 +442,6 @@ ledgerTransition = do
               , certState
               , StrictSeq.fromStrict $ txBody ^. certsTxBodyL
               )
-        let wdrlAddrs = Map.keysSet . unWithdrawals $ tx ^. bodyTxL . withdrawalsTxBodyL
-            wdrlCreds = Set.map raCredential wdrlAddrs
-            dUnified = dsUnified $ certDState certStateAfterCERTS
-            delegatedAddrs = DRepUView dUnified
-
-        -- TODO: Finish this implementation once we are in bootstrap phase:
-        -- https://github.com/IntersectMBO/cardano-ledger/issues/4092
-        when False $ do
-          all (`UMap.member` delegatedAddrs) wdrlCreds
-            ?! ConwayWdrlNotDelegatedToDRep (wdrlCreds Set.\\ Map.keysSet (dRepMap dUnified))
 
         -- Votes and proposals from signal tx
         let govSignal =
@@ -492,6 +528,7 @@ instance
   ( Embed (EraRule "UTXOW" era) (ConwayLEDGER era)
   , Embed (EraRule "CERTS" era) (ConwayLEDGER era)
   , Embed (EraRule "GOV" era) (ConwayLEDGER era)
+  , Embed (EraRule "MEMPOOL" era) (ConwayLEDGER era)
   , ConwayEraGov era
   , AlonzoEraTx era
   , ConwayEraTxBody era
@@ -500,12 +537,15 @@ instance
   , Environment (EraRule "UTXOW" era) ~ UtxoEnv era
   , Environment (EraRule "CERTS" era) ~ CertsEnv era
   , Environment (EraRule "GOV" era) ~ GovEnv era
+  , Environment (EraRule "MEMPOOL" era) ~ LedgerEnv era
   , Signal (EraRule "UTXOW" era) ~ Tx era
   , Signal (EraRule "CERTS" era) ~ Seq (TxCert era)
   , Signal (EraRule "GOV" era) ~ GovSignal era
+  , Signal (EraRule "MEMPOOL" era) ~ Tx era
   , State (EraRule "UTXOW" era) ~ UTxOState era
   , State (EraRule "CERTS" era) ~ CertState era
   , State (EraRule "GOV" era) ~ Proposals era
+  , State (EraRule "MEMPOOL" era) ~ LedgerState era
   , EraRule "GOV" era ~ ConwayGOV era
   , PredicateFailure (EraRule "LEDGER" era) ~ ConwayLedgerPredFailure era
   , Event (EraRule "LEDGER" era) ~ ConwayLedgerEvent era
@@ -542,3 +582,15 @@ instance
   where
   wrapFailed = ConwayCertsFailure . CertFailure . DelegFailure
   wrapEvent = CertsEvent . CertEvent . DelegEvent
+
+instance
+  ( EraGov era
+  , EraTx era
+  , EraRule "MEMPOOL" era ~ ConwayMEMPOOL era
+  , PredicateFailure (EraRule "MEMPOOL" era) ~ ConwayMempoolPredFailure era
+  , Event (EraRule "MEMPOOL" era) ~ ConwayMempoolEvent era
+  ) =>
+  Embed (ConwayMEMPOOL era) (ConwayLEDGER era)
+  where
+  wrapFailed (ConwayMempoolPredFailure t) = ConwayMempoolFailure t
+  wrapEvent = MempoolEvent

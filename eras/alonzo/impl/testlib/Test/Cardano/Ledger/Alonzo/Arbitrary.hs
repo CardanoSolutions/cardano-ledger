@@ -32,10 +32,10 @@ module Test.Cardano.Ledger.Alonzo.Arbitrary (
 
 import Cardano.Ledger.Alonzo.Core
 import Cardano.Ledger.Alonzo.Genesis (AlonzoGenesis (..))
-import Cardano.Ledger.Alonzo.PParams (AlonzoPParams (AlonzoPParams), OrdExUnits (OrdExUnits))
 import Cardano.Ledger.Alonzo.Plutus.Context (ContextError)
 import Cardano.Ledger.Alonzo.Plutus.Evaluate (CollectError)
 import Cardano.Ledger.Alonzo.Plutus.TxInfo (AlonzoContextError)
+import Cardano.Ledger.Alonzo.PParams (AlonzoPParams (AlonzoPParams), OrdExUnits (OrdExUnits))
 import Cardano.Ledger.Alonzo.Rules (
   AlonzoUtxoPredFailure (..),
   AlonzoUtxosPredFailure (..),
@@ -357,19 +357,7 @@ instance
   ) =>
   Arbitrary (AlonzoUtxowPredFailure era)
   where
-  -- Switch to this implementation once #4110 is taken care of
-  -- arbitrary = genericArbitraryU
-  arbitrary =
-    oneof
-      [ ShelleyInAlonzoUtxowPredFailure <$> arbitrary
-      , -- MissingRedeemers <$> arbitrary -- see #4110
-        MissingRequiredDatums <$> arbitrary <*> arbitrary
-      , NotAllowedSupplementalDatums <$> arbitrary <*> arbitrary
-      , PPViewHashesDontMatch <$> arbitrary <*> arbitrary
-      , MissingRequiredSigners <$> arbitrary
-      , UnspendableUTxONoDatumHash <$> arbitrary
-      -- , ExtraRedeemers <$> arbitrary -- see #4110
-      ]
+    arbitrary = genericArbitraryU
 
 deriving instance Arbitrary ix => Arbitrary (AsIx ix it)
 

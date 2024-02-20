@@ -582,7 +582,8 @@ instance (Era era, Arbitrary (PParamsUpdate era)) => Arbitrary (ProposalProcedur
 instance (EraPParams era, Arbitrary (PParamsUpdate era)) => Arbitrary (GovProcedures era) where
   arbitrary =
     GovProcedures <$> arbitrary <*> arbitrary
-  shrink (GovProcedures vp pp) = [GovProcedures vp' pp' | (vp', pp') <- shrink (vp, pp)]
+  shrink (GovProcedures vp pp) =
+    [GovProcedures vp' pp' | (vp', pp') <- shrink (vp, pp)]
 
 instance
   ( Era era

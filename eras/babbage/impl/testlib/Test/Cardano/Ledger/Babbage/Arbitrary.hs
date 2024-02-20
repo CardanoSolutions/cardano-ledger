@@ -9,6 +9,7 @@
 
 module Test.Cardano.Ledger.Babbage.Arbitrary () where
 
+import Cardano.Ledger.Babbage.TxInfo (BabbageContextError)
 import Cardano.Ledger.Babbage
 import Cardano.Ledger.Babbage.Core
 import Cardano.Ledger.Babbage.PParams

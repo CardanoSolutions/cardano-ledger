@@ -126,6 +126,7 @@ library testlib
         cardano-ledger-shelley:{cardano-ledger-shelley, testlib},
         plutus-ledger-api,
         data-default-class,
+        generic-random,
         microlens,
         text
 

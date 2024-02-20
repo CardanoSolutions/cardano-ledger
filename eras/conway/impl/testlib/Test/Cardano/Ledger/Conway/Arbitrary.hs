@@ -45,6 +45,7 @@ import Cardano.Ledger.Conway.Rules
 import Cardano.Ledger.Conway.Scripts (ConwayPlutusPurpose (..))
 import Cardano.Ledger.Conway.TxBody
 import Cardano.Ledger.Conway.TxCert
+import Cardano.Ledger.Conway.TxInfo (ConwayContextError)
 import Cardano.Ledger.Crypto (Crypto)
 import Cardano.Ledger.HKD (HKD, NoUpdate (..))
 import Control.State.Transition.Extended (STS (Event))
@@ -58,6 +59,7 @@ import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
 import Data.Word
 import Lens.Micro
+import Generic.Random (genericArbitraryU)
 import Test.Cardano.Data (genNonEmptyMap)
 import Test.Cardano.Data.Arbitrary ()
 import Test.Cardano.Ledger.Alonzo.Arbitrary (
@@ -78,6 +80,16 @@ instance
   Arbitrary (DRepPulsingState era)
   where
   arbitrary = DRComplete <$> arbitrary <*> arbitrary
+
+instance
+  ( Era era
+  , Arbitrary (PlutusPurpose AsItem era)
+  , Arbitrary (PlutusPurpose AsIndex era)
+  , Arbitrary (TxCert era)
+  ) =>
+  Arbitrary (ConwayContextError era)
+  where
+  arbitrary = genericArbitraryU
 
 instance Crypto c => Arbitrary (ConwayGenesis c) where
   arbitrary =
@@ -531,22 +543,21 @@ instance (EraPParams era, Arbitrary (PParamsUpdate era)) => Arbitrary (GovProced
   arbitrary =
     GovProcedures <$> arbitrary <*> arbitrary
 
-instance Era era => Arbitrary (ConwayGovPredFailure era) where
-  arbitrary = GovActionsDoNotExist <$> arbitrary
+instance
+  ( Era era
+  , Arbitrary (PParamsHKD StrictMaybe era)
+  ) => Arbitrary (ConwayGovPredFailure era) where
+  arbitrary = genericArbitraryU
 
 instance
-  ( Arbitrary (PredicateFailure (EraRule "UTXOW" era))
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "UTXOW" era))
   , Arbitrary (PredicateFailure (EraRule "CERTS" era))
   , Arbitrary (PredicateFailure (EraRule "GOV" era))
   ) =>
   Arbitrary (ConwayLedgerPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ ConwayUtxowFailure <$> arbitrary
-      , ConwayCertsFailure <$> arbitrary
-      , ConwayGovFailure <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 -- EPOCH
 
@@ -585,12 +596,7 @@ instance
   ) =>
   Arbitrary (ConwayCertsPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ DelegateeNotRegisteredDELEG <$> arbitrary
-      , WithdrawalsNotInRewardsCERTS <$> arbitrary
-      , CertFailure <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 -- CERT
 
@@ -602,12 +608,7 @@ instance
   ) =>
   Arbitrary (ConwayCertPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ DelegFailure <$> arbitrary
-      , PoolFailure <$> arbitrary
-      , GovCertFailure <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 -- DELEG
 
@@ -615,25 +616,12 @@ instance
   Era era =>
   Arbitrary (ConwayDelegPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ IncorrectDepositDELEG <$> arbitrary
-      , StakeKeyRegisteredDELEG <$> arbitrary
-      , StakeKeyNotRegisteredDELEG <$> arbitrary
-      , StakeKeyHasNonZeroRewardAccountBalanceDELEG <$> arbitrary
-      , DRepAlreadyRegisteredForStakeKeyDELEG <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 -- GOVCERT
 
 instance Era era => Arbitrary (ConwayGovCertPredFailure era) where
-  arbitrary =
-    oneof
-      [ ConwayDRepAlreadyRegistered <$> arbitrary
-      , ConwayDRepNotRegistered <$> arbitrary
-      , ConwayDRepIncorrectDeposit <$> arbitrary <*> arbitrary
-      , ConwayCommitteeHasPreviouslyResigned <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 instance Arbitrary (HKD f a) => Arbitrary (THKD t f a) where
   arbitrary = THKD <$> arbitrary

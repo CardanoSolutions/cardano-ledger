@@ -9,6 +9,7 @@
 
 module Test.Cardano.Ledger.Babbage.Arbitrary () where
 
+import Cardano.Ledger.Babbage.TxInfo (BabbageContextError)
 import Cardano.Ledger.Babbage
 import Cardano.Ledger.Babbage.Core
 import Cardano.Ledger.Babbage.PParams
@@ -17,8 +18,11 @@ import Cardano.Ledger.Babbage.Tx
 import Cardano.Ledger.Babbage.TxBody (BabbageTxOut (..))
 import Cardano.Ledger.BaseTypes (StrictMaybe)
 import Cardano.Ledger.Binary (Sized)
+import Cardano.Ledger.Crypto (Crypto)
+import Cardano.Ledger.Plutus.TxInfo (TxOutSource)
 import Control.State.Transition (STS (PredicateFailure))
 import Data.Functor.Identity (Identity)
+import Generic.Random (genericArbitraryU)
 import Test.Cardano.Ledger.Alonzo.Arbitrary ()
 import Test.QuickCheck
 
@@ -76,6 +80,16 @@ instance Arbitrary (BabbagePParams StrictMaybe era) where
       <*> arbitrary
       <*> arbitrary
 
+instance Crypto crypto => Arbitrary (TxOutSource crypto) where
+    arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PlutusPurpose AsIndex era)
+  ) => Arbitrary (BabbageContextError era)
+  where
+  arbitrary = genericArbitraryU
+
 instance
   ( EraTxOut era
   , Arbitrary (Value era)
@@ -84,27 +98,18 @@ instance
   ) =>
   Arbitrary (BabbageUtxoPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ AlonzoInBabbageUtxoPredFailure <$> arbitrary
-      , IncorrectTotalCollateralField <$> arbitrary <*> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 instance
   ( Era era
   , Arbitrary (PredicateFailure (EraRule "UTXO" era))
   , Arbitrary (PlutusPurpose AsItem era)
   , Arbitrary (TxCert era)
+  , Arbitrary (PlutusPurpose AsIndex era)
   ) =>
   Arbitrary (BabbageUtxowPredFailure era)
   where
-  arbitrary =
-    oneof
-      [ AlonzoInBabbageUtxowPredFailure <$> arbitrary
-      , UtxoFailure <$> arbitrary
-      , MalformedScriptWitnesses <$> arbitrary
-      , MalformedReferenceScripts <$> arbitrary
-      ]
+  arbitrary = genericArbitraryU
 
 instance
   ( EraTxOut era

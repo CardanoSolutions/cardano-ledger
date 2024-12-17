@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -86,6 +87,8 @@ import qualified Data.Set as Set
 import qualified Data.VMap as VMap
 import Data.Word (Word64)
 import Lens.Micro ((^.))
+import Cardano.Ledger.Shelley.RewardProvenance (RewardProvenance(RewardProvenance))
+import qualified Cardano.Ledger.Shelley.RewardProvenance as RP
 
 -- =============================
 -- To prevent a huge pause, at the stability point, we spread out the
@@ -104,7 +107,7 @@ startStep ::
   Coin ->
   ActiveSlotCoeff ->
   Word64 ->
-  PulsingRewUpdate (EraCrypto era)
+  (PulsingRewUpdate (EraCrypto era), RewardProvenance (EraCrypto era))
 startStep slotsPerEpoch b@(BlocksMade b') es@(EpochState acnt ls ss nm) maxSupply asc secparam =
   let SnapShot stake delegs poolParams = ssStakeGo ss
       numStakeCreds, k :: Rational
@@ -227,7 +230,28 @@ startStep slotsPerEpoch b@(BlocksMade b') es@(EpochState acnt ls ss nm) maxSuppl
           free
           (unStake stake)
           (RewardAns Map.empty Map.empty)
-   in Pulsing rewsnap pulser
+      provenance =
+        RewardProvenance
+          { RP.spe = case slotsPerEpoch of EpochSize n -> n,
+            RP.blocks = b,
+            RP.blocksCount = blocksMade,
+            RP.maxLL = maxSupply,
+            RP.deltaR1 = deltaR1,
+            RP.r = _R,
+            RP.totalStake = totalStake,
+            RP.activeStake = activeStake,
+            RP.d = d,
+            RP.expBlocks = expectedBlocks,
+            RP.eta = eta,
+            RP.rPot = Coin rPot,
+            RP.deltaT1 = Coin deltaT1,
+            RP.pools = fmap (\case
+              Left (StakeShare r) -> Left r
+              Right info -> Right info
+            ) (VMap.toMap allPoolInfo)
+          }
+
+   in (Pulsing rewsnap pulser, provenance)
 
 -- Phase 2
 
@@ -308,13 +332,13 @@ createRUpd ::
   Coin ->
   ActiveSlotCoeff ->
   Word64 ->
-  ShelleyBase (RewardUpdate (EraCrypto era))
+  ShelleyBase (RewardUpdate (EraCrypto era), RewardProvenance (EraCrypto era))
 createRUpd slotsPerEpoch blocksmade epstate maxSupply asc secparam = do
-  let step1 = startStep slotsPerEpoch blocksmade epstate maxSupply asc secparam
+  let (step1, provenance) = startStep slotsPerEpoch blocksmade epstate maxSupply asc secparam
   (step2, _event) <- pulseStep step1
   case step2 of
-    Complete r -> pure r
-    Pulsing rewsnap pulser -> fst <$> completeRupd (Pulsing rewsnap pulser)
+    Complete r -> pure (r, provenance)
+    Pulsing rewsnap pulser -> (,provenance) . fst <$> completeRupd (Pulsing rewsnap pulser)
 
 -- | Calculate the current circulation
 --

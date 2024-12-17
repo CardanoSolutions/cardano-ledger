@@ -12,6 +12,7 @@ module Cardano.Ledger.Shelley.RewardProvenance (
 )
 where
 
+import Cardano.Ledger.Shelley.Rewards (PoolRewardInfo (..))
 import Cardano.Ledger.BaseTypes (BlocksMade (..))
 import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
 import Cardano.Ledger.Binary.Coders
@@ -109,9 +110,6 @@ data RewardProvenance c = RewardProvenance
   , deltaR1 :: !Coin
   -- ^ The maximum amount of Lovelace which can be removed from the reserves
   -- to be given out as rewards for the given epoch.
-  , deltaR2 :: !Coin
-  -- ^ The difference between the total Lovelace that could have been
-  -- distributed as rewards this epoch (which is 'r') and what was actually distributed.
   , r :: !Coin
   -- ^ The total Lovelace available for rewards for the given epoch,
   -- equal to 'rPot' less 'deltaT1'.
@@ -132,16 +130,10 @@ data RewardProvenance c = RewardProvenance
   -- ^ The amount of Lovelace taken from the treasury for the given epoch.
   , activeStake :: !Coin
   -- ^ The amount of Lovelace that is delegated during the given epoch.
-  , pools ::
-      !( Map
-          (KeyHash 'StakePool c)
-          (RewardProvenancePool c)
-       )
-  -- ^ Individual stake pool provenance.
-  , desirabilities ::
-      !(Map (KeyHash 'StakePool c) Desirability)
-  -- ^ A map from pool ID to the desirability score.
-  -- See the <https://github.com/intersectmbo/cardano-ledger/releases/latest/download/pool-ranking.pdf stake pool ranking document>.
+  , pools :: Map
+      (KeyHash 'StakePool c)
+      (Either Rational (PoolRewardInfo c))
+  -- ^ Stake pools specific information needed to compute the rewards for its members.
   }
   deriving (Eq, Generic)
 
@@ -166,7 +158,6 @@ instance Default (RewardProvenance c) where
       (Coin 0)
       (Coin 0)
       (Coin 0)
-      (Coin 0)
       0
       0
       0
@@ -174,7 +165,6 @@ instance Default (RewardProvenance c) where
       (Coin 0)
       (Coin 0)
       (Coin 0)
-      def
       def
 
 -- =======================================================
@@ -225,7 +215,6 @@ instance Show (RewardProvenance c) where
         , "blocks = " ++ show (blocks t)
         , "maxLL = " ++ show (maxLL t)
         , "deltaR1 = " ++ show (deltaR1 t)
-        , "deltaR2 = " ++ show (deltaR2 t)
         , "r = " ++ show (r t)
         , "totalStake = " ++ show (totalStake t)
         , "blocksCount = " ++ show (blocksCount t)
@@ -235,8 +224,6 @@ instance Show (RewardProvenance c) where
         , "rPot = " ++ show (rPot t)
         , "deltaT1 = " ++ show (deltaT1 t)
         , "activeStake = " ++ show (activeStake t)
-        , "pools = " ++ show (pools t)
-        , "desirabilities = " ++ show (desirabilities t)
         ]
 
 -- =======================================================
@@ -280,14 +267,13 @@ instance Crypto c => DecCBOR (RewardProvenancePool c) where
         <! From
 
 instance Crypto c => EncCBOR (RewardProvenance c) where
-  encCBOR (RewardProvenance p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15 p16) =
+  encCBOR (RewardProvenance p1 p2 p3 p4 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15) =
     encode $
       Rec RewardProvenance
         !> To p1
         !> To p2
         !> To p3
         !> To p4
-        !> To p5
         !> To p6
         !> To p7
         !> To p8
@@ -298,14 +284,11 @@ instance Crypto c => EncCBOR (RewardProvenance c) where
         !> To p13
         !> To p14
         !> To p15
-        !> To p16
 
 instance Crypto c => DecCBOR (RewardProvenance c) where
   decCBOR =
     decode $
       RecD RewardProvenance
-        <! From
-        <! From
         <! From
         <! From
         <! From

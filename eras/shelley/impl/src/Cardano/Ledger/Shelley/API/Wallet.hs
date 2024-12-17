@@ -412,11 +412,9 @@ getRewardProvenance ::
   NewEpochState era ->
   (RewardUpdate (EraCrypto era), RewardProvenance (EraCrypto era))
 getRewardProvenance globals newepochstate =
-  ( runReader
+  runReader
       (createRUpd slotsPerEpoch blocksmade epochstate maxsupply asc secparam)
       globals
-  , def
-  )
   where
     epochstate = nesEs newepochstate
     maxsupply :: Coin

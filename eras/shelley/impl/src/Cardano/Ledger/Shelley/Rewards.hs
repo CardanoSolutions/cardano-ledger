@@ -55,6 +55,7 @@ import Cardano.Ledger.UMap (compactCoinOrError)
 import Cardano.Ledger.Val ((<->))
 import Control.DeepSeq (NFData)
 import Control.Monad (guard)
+import Data.Aeson (FromJSON (..), ToJSON (..))
 import Data.Foldable (fold, foldMap')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -227,6 +228,12 @@ data PoolRewardInfo c = PoolRewardInfo
 instance NoThunks (PoolRewardInfo c)
 
 instance NFData (PoolRewardInfo c)
+
+instance ToJSON (PoolRewardInfo c) where
+  toJSON = undefined
+
+instance FromJSON (PoolRewardInfo c) where
+  parseJSON = undefined
 
 instance CC.Crypto c => EncCBOR (PoolRewardInfo c) where
   encCBOR
